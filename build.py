@@ -773,7 +773,7 @@ def derle(work, env=None, komut=None, sessizlik_siniri=SESSIZLIK_SINIRI, calisti
             print(gizle("\n".join(sonu.splitlines()[-150:])), file=sys.stderr)
         if asildi:
             raise Kirmizi("ios.sh %d sn hiç çıktı vermedi, süreç grubu öldürüldü; son çıktı: %r; build.log sonunda bağımlılığı bekleyen kütüphaneler: %s"
-                          % (sessizlik_siniri, son.decode("utf-8", "replace")[-80:], ", ".join(bekleyen) or "yok"))
+                          % (sessizlik_siniri, gizle(son.decode("utf-8", "replace"))[-80:], ", ".join(bekleyen) or "yok"))
         raise Kirmizi("ios.sh başarısız (kod %d)" % rc)
     return cikti_dizini_bul(work)
 
@@ -2838,6 +2838,11 @@ def _selftest_bekci(s, kok):
                                 'echo "INFO: Skipping freetype, dependencies built=0, already built=" >> build.log\nsleep 60\n')
     s.tamam("derle: takılan ios.sh kırmızı, son çıktı ve bekleyen kütüphaneler mesajda",
             "hiç çıktı vermedi" in mesaj and "lame: ok" in mesaj and "freetype, libass" in mesaj and "Skipping freetype" in hata)
+    # m1 (SK-941): hata mesajı da gizle'den geçer; son çıktıdaki değer mesaja (ve herkese açık adım günlüğüne) girmez.
+    # Değer 80 baytı aşar: önce kesip sonra maskelemek ad olmadan kalan değeri sızdırırdı.
+    mesaj, hata, _ = derle_sina('printf "lame: ok\\nX_TOKEN=%s\\n"\nsleep 60\n' % ("gizli-deger-77-" * 8))
+    s.tamam("derle: takılma mesajındaki son çıktıda gizli değer maskelenir (m1)",
+            "hiç çıktı vermedi" in mesaj and "gizli-deger-77" not in mesaj and "X_TOKEN=***" in mesaj)
     mesaj, hata, _ = derle_sina('yes satir | head -n 800000 > build.log\necho GITHUB_TOKEN=cok-gizli >> build.log\necho SON_SATIR >> build.log\nexit 1\n')
     s.tamam("derle: başarısız ios.sh kırmızı; build.log'un yalnız sonu yazdırılır", mesaj == "ios.sh başarısız (kod 1)" and "SON_SATIR" in hata and len(hata) < 4000 * 20)
     s.tamam("derle: yazdırılan build.log sonunda gizli değer maskelenir", "cok-gizli" not in hata and "GITHUB_TOKEN=***" in hata)

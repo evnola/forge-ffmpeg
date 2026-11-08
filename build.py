@@ -123,6 +123,31 @@ def kirmizi_if(kosul, mesaj):
         raise Kirmizi(mesaj)
 
 
+# MARK: - Günlük gizleme
+
+# Hata mesajına ve tanı artifact'ına giren metin önce buradan geçer. Derleme ortamı izin listesiyle sınırlı olduğundan (ENV_IZINLI)
+# beklenen içerik zaten gizlisizdir; bu ikinci savunmadır (GitHub adım günlüğünü maskeler, artifact'ı maskelemez).
+GIZLE_KALIPLARI = (
+    (re.compile(r"://[^/@\s]+@"), "://***@"),
+    (re.compile(r"gh[pousr]_[A-Za-z0-9]{20,}|github_pat_[A-Za-z0-9_]{20,}"), "***"),
+    (re.compile(r"(?im)^([ \t]*(?:proxy-)?authorization[ \t]*:).*$"), r"\1 ***"),
+    (re.compile(r"(?i)\bbearer[ \t]+[A-Za-z0-9._~+/=-]{8,}"), "bearer ***"),
+    (re.compile(r"(?i)\b([A-Za-z0-9_]*(?:TOKEN|SECRET|PASSWORD|PASSWD|API_?KEY|CREDENTIAL|AUTH)[A-Za-z0-9_]*)=[^\r\n]*"), r"\1=***"),
+)
+
+
+def gizle(metin):
+    for kalip, yerine in GIZLE_KALIPLARI:
+        metin = kalip.sub(yerine, metin)
+    return metin
+
+
+def git_hata_ozeti(err, sinir=300):
+    """git stderr'inin son üç boş olmayan satırı: gizlenmiş, kısaltılmış; boşsa 'çıktı yok'."""
+    satirlar = [l.strip() for l in gizle(err.decode("utf-8", "replace")).splitlines() if l.strip()][-3:]
+    return " | ".join(satirlar)[:sinir] or "çıktı yok"
+
+
 # MARK: - git yardımcıları
 
 def git(args, cwd=None, dosya_izni=False, girdi=None, zaman=900):
@@ -142,7 +167,7 @@ def git(args, cwd=None, dosya_izni=False, girdi=None, zaman=900):
 def git_ok(args, cwd=None, dosya_izni=False, girdi=None):
     rc, out, err = git(args, cwd, dosya_izni, girdi)
     if rc != 0:
-        ozet = err.decode("utf-8", "replace").strip().splitlines()[-1:] or [""]
+        ozet = gizle(err.decode("utf-8", "replace")).strip().splitlines()[-1:] or [""]
         raise Kirmizi("git %s başarısız (kod %d): %s" % (args[0], rc, ozet[0][:200]))
     return out
 
@@ -226,15 +251,15 @@ def kaynak_cek(k, yol, dosya_izni):
     else:
         os.makedirs(yol)
     git_ok(["init", "-q"], yol)
-    rc, _, _ = git(["fetch", "--depth", "1", "--no-tags", k["url"], k["commit"]], yol, dosya_izni)
-    kirmizi_if(rc != 0, "%s: commit %s indirilemedi; etikete dönülmez" % (k["name"], k["commit"][:12]))
+    rc, _, err = git(["fetch", "--depth", "1", "--no-tags", k["url"], k["commit"]], yol, dosya_izni)
+    kirmizi_if(rc != 0, "%s: commit %s indirilemedi; etikete dönülmez (git: %s)" % (k["name"], k["commit"][:12], git_hata_ozeti(err)))
     git_ok(["checkout", "-q", "--detach", "FETCH_HEAD"], yol)
     kirmizi_if(git_metin(["rev-parse", "HEAD"], yol) != k["commit"], "%s: HEAD kilitteki commit değil" % k["name"])
     if ic:
         return
     # Etiket ayrıca getirilir: FFmpeg sürüm dizesi `git describe` ile üretilir ve Next yerel etiket ister.
-    rc, _, _ = git(["fetch", "--depth", "1", "--no-tags", k["url"], "+refs/tags/%s:refs/tags/%s" % (k["ref"], k["ref"])], yol, dosya_izni)
-    kirmizi_if(rc != 0, "%s: ref etiketi getirilemedi" % k["name"])
+    rc, _, err = git(["fetch", "--depth", "1", "--no-tags", k["url"], "+refs/tags/%s:refs/tags/%s" % (k["ref"], k["ref"])], yol, dosya_izni)
+    kirmizi_if(rc != 0, "%s: ref etiketi getirilemedi (git: %s)" % (k["name"], git_hata_ozeti(err)))
     rc, out, _ = git(["rev-parse", "--verify", "-q", "refs/tags/%s^{commit}" % k["ref"]], yol)
     kirmizi_if(rc != 0 or out.decode().strip() != k["commit"], "%s: ref etiketi kilitteki commit'e işaret etmiyor" % k["name"])
 
@@ -2331,6 +2356,8 @@ def _selftest_icerik(s, kok):
         s.tamam("%s altında bozuk ağaç çıkış kodu 1" % ad, p.returncode == 1 and b"KIRMIZI" in p.stderr)
     p = subprocess.run([sys.executable, os.path.abspath(__file__), "verify-lock", "--work", kok, "--lock", lp2, "--asama", "yanlis"], stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=120)
     s.tamam("kullanım hatası çıkış kodu 2", p.returncode == 2)
+
+
 
 
 if __name__ == "__main__":

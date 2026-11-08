@@ -1036,39 +1036,61 @@ def ikili_yolu(xc, fw, dilim):
     return os.path.join(xc, fw + ".xcframework", dilim, fw + ".framework", fw)
 
 
-# FFmpeg configure'ın ürettiği derlenmiş küme listeleri (kaynak ağaçta): (tür, dosya, izinli sonekler).
+# FFmpeg configure'ın ürettiği derlenmiş küme listeleri (kaynak ağaçta): (tür, dosya, izinli sonekler, yapı adı, dizi adı).
+# Yapı ve dizi adları configure@946fcce print_enabled_components çağrılarından (:8961-8969) sabitlenmiştir.
 KUME_DOSYALARI = (
-    ("protocol", "libavformat/protocol_list.c", ("_protocol",)),
-    ("demuxer", "libavformat/demuxer_list.c", ("_demuxer",)),
-    ("muxer", "libavformat/muxer_list.c", ("_muxer",)),
-    ("codec", "libavcodec/codec_list.c", ("_decoder", "_encoder")),
-    ("parser", "libavcodec/parser_list.c", ("_parser",)),
-    ("bsf", "libavcodec/bsf_list.c", ("_bsf",)),
-    ("filter", "libavfilter/filter_list.c", ()),
-    ("indev", "libavdevice/indev_list.c", ("_demuxer",)),
-    ("outdev", "libavdevice/outdev_list.c", ("_muxer",)),
+    ("protocol", "libavformat/protocol_list.c", ("_protocol",), "URLProtocol", "url_protocols"),
+    ("demuxer", "libavformat/demuxer_list.c", ("_demuxer",), "FFInputFormat", "demuxer_list"),
+    ("muxer", "libavformat/muxer_list.c", ("_muxer",), "FFOutputFormat", "muxer_list"),
+    ("codec", "libavcodec/codec_list.c", ("_decoder", "_encoder"), "FFCodec", "codec_list"),
+    ("parser", "libavcodec/parser_list.c", ("_parser",), "FFCodecParser", "parser_list"),
+    ("bsf", "libavcodec/bsf_list.c", ("_bsf",), "FFBitStreamFilter", "bitstream_filters"),
+    ("filter", "libavfilter/filter_list.c", (), "FFFilter", "filter_list"),
+    ("indev", "libavdevice/indev_list.c", ("_demuxer",), "FFInputFormat", "indev_list"),
+    ("outdev", "libavdevice/outdev_list.c", ("_muxer",), "FFOutputFormat", "outdev_list"),
 )
-RE_KUME_GIRDI = re.compile(rb"&ff_([A-Za-z0-9_]+)\s*,")
+# Next iOS'ta tek aday outdev'i (audiotoolbox) kapatır (scripts/apple/ffmpeg.sh), --disable-autodetect altında başkası açılmaz:
+# outdev listesi gerçekten boştur ve boş olması beklenir; başka hiçbir liste boş olamaz.
+BOS_BEKLENEN_TUR = "outdev"
+RE_KUME_ADIM = re.compile(rb"    &ff_([A-Za-z0-9_]+),\n")
+RE_KUME_GOVDE = re.compile(rb"(?:    &ff_[A-Za-z0-9_]+,\n)*")
+KUME_SON = b"    NULL };\n"
+
+
+def kume_dosyasi_ayristir(icerik, yapi, dizi, dosya):
+    """Üretecin dilbilgisiyle bayt düzeyinde sıkı ayrıştırma: `static const <yapı> * const <dizi>[] = {`, sıfır ya da daha çok
+    `    &ff_<ad>,` satırı, `    NULL };` ve dosya sonu. Başka satır, CR, ikinci NULL, eksik sonlandırıcı ya da yinelenen girdi kırmızıdır."""
+    baslik = ("static const %s * const %s[] = {\n" % (yapi, dizi)).encode("ascii")
+    kirmizi_if(len(icerik) < len(baslik) + len(KUME_SON) or not icerik.startswith(baslik), "%s: başlık beklenen biçimde değil" % dosya)
+    kirmizi_if(not icerik.endswith(KUME_SON), "%s: NULL sonlandırıcısı beklenen biçimde değil" % dosya)
+    govde = icerik[len(baslik):len(icerik) - len(KUME_SON)]
+    kirmizi_if(RE_KUME_GOVDE.fullmatch(govde) is None, "%s: beklenmeyen satır (yalnız `    &ff_<ad>,` satırları ve son `    NULL };` olabilir)" % dosya)
+    adlar = [m.decode("ascii") for m in RE_KUME_ADIM.findall(govde)]
+    kirmizi_if(len(set(adlar)) != len(adlar), "%s: yinelenen girdi" % dosya)
+    return adlar
 
 
 def derlenmis_kume(ffmpeg_agaci):
-    """Listelerden (tür, ad) kümesi. Boş liste ya da tanınmayan sonek kırmızıdır: biçim değişmişse sessiz geçilmez."""
+    """Listelerden (tür, ad) kümesi. Biçim değişmişse, tanınmayan sonek, beklenmedik boş liste ya da dolu outdev kırmızıdır; sessiz geçilmez."""
     kume = set()
-    for tur, dosya, sonekler in KUME_DOSYALARI:
+    for tur, dosya, sonekler, yapi, dizi in KUME_DOSYALARI:
         yol = os.path.join(ffmpeg_agaci, *dosya.split("/"))
         kirmizi_if(not os.path.isfile(yol), "derlenmiş küme listesi yok: %s" % dosya)
         with open(yol, "rb") as f:
             icerik = f.read()
-        bulunan = [m.group(1).decode("ascii") for m in RE_KUME_GIRDI.finditer(icerik)]
-        kirmizi_if(not bulunan, "derlenmiş küme listesi boş ya da ayrıştırılamadı: %s" % dosya)
+        bulunan = kume_dosyasi_ayristir(icerik, yapi, dizi, dosya)
+        if tur == BOS_BEKLENEN_TUR:
+            kirmizi_if(bulunan, "%s kümesi boş değil: %s" % (tur, dosya))
+            continue
+        kirmizi_if(not bulunan, "derlenmiş küme listesi boş: %s" % dosya)
         for tam in bulunan:
             if not sonekler:
                 kume.add((tur, tam))
                 continue
-            for s in sonekler:
-                if tam.endswith(s) and len(tam) > len(s):
-                    ad = tam[:-len(s)]
-                    kume.add((s[1:] if tur == "codec" else tur, ad))
+            for sonek in sonekler:
+                if tam.endswith(sonek) and len(tam) > len(sonek):
+                    ad = tam[:-len(sonek)]
+                    kume.add((sonek[1:] if tur == "codec" else tur, ad))
                     break
             else:
                 raise Kirmizi("%s: tanınmayan girdi soneki" % dosya)
@@ -1714,24 +1736,48 @@ def _sahte_xc(kok, belirtecler=None, lisans=b"LGPL version 3 or later", dilimler
     return xc
 
 
+# configure@946fcce :8961-8969 print_enabled_components çağrılarından elle yazılmış (dosya: yapı, dizi); build.py'nin KUME_DOSYALARI'ndan türetilmez.
+KUME_GERCEK = {
+    "libavfilter/filter_list.c": ("FFFilter", "filter_list"),
+    "libavcodec/codec_list.c": ("FFCodec", "codec_list"),
+    "libavcodec/parser_list.c": ("FFCodecParser", "parser_list"),
+    "libavcodec/bsf_list.c": ("FFBitStreamFilter", "bitstream_filters"),
+    "libavformat/demuxer_list.c": ("FFInputFormat", "demuxer_list"),
+    "libavformat/muxer_list.c": ("FFOutputFormat", "muxer_list"),
+    "libavdevice/indev_list.c": ("FFInputFormat", "indev_list"),
+    "libavdevice/outdev_list.c": ("FFOutputFormat", "outdev_list"),
+    "libavformat/protocol_list.c": ("URLProtocol", "url_protocols"),
+}
+# Gerçek yapıdaki örnek içerik: filter_list'in sonuna configure'ın koşulsuz eklediği dört girdi dahil, outdev boş (Next iOS'ta audiotoolbox'ı kapatır).
+KUME_ORNEK = {
+    "libavformat/protocol_list.c": ["file_protocol"],
+    "libavformat/demuxer_list.c": ["mov_demuxer", "matroska_demuxer", "mp3_demuxer"],
+    "libavformat/muxer_list.c": ["mp4_muxer", "null_muxer"],
+    "libavcodec/codec_list.c": ["h264_decoder", "aac_encoder"],
+    "libavcodec/parser_list.c": ["h264_parser"],
+    "libavcodec/bsf_list.c": ["null_bsf"],
+    "libavfilter/filter_list.c": ["vf_scale", "af_aresample", "asrc_abuffer", "vsrc_buffer", "asink_abuffer", "vsink_buffer"],
+    "libavdevice/indev_list.c": ["lavfi_demuxer", "avfoundation_demuxer"],
+    "libavdevice/outdev_list.c": [],
+}
+
+
+def _liste_dosyasi(dosya, girdiler, yapi=None):
+    """configure'ın print_enabled_components çıktısı: başlık, `    &ff_<ad>,` satırları, `    NULL };`."""
+    yapi_adi, dizi = KUME_GERCEK[dosya]
+    return "static const %s * const %s[] = {\n" % (yapi or yapi_adi, dizi) + "".join("    &ff_%s,\n" % g for g in girdiler) + "    NULL };\n"
+
+
 def _sahte_kume(kok, degistir=None, atla=()):
+    """degistir: dosya -> girdi listesi (tam, gerçek biçimli dosya üretilir) ya da str (ham içerik, bozuk biçim denemeleri için)."""
     ff = os.path.join(kok, "ffmpeg")
-    ornek = {
-        "libavformat/protocol_list.c": "static const URLProtocol * const url_protocols[] = {\n    &ff_file_protocol,\n    NULL };\n",
-        "libavformat/demuxer_list.c": "static const FFInputFormat * const demuxer_list[] = {\n    &ff_mov_demuxer,\n    &ff_matroska_demuxer,\n    &ff_mp3_demuxer,\n    NULL };\n",
-        "libavformat/muxer_list.c": "static const FFOutputFormat * const muxer_list[] = {\n    &ff_mp4_muxer,\n    &ff_null_muxer,\n    NULL };\n",
-        "libavcodec/codec_list.c": "static const FFCodec * const codec_list[] = {\n    &ff_h264_decoder,\n    &ff_aac_encoder,\n    NULL };\n",
-        "libavcodec/parser_list.c": "static const AVCodecParser * const parser_list[] = {\n    &ff_h264_parser,\n    NULL };\n",
-        "libavcodec/bsf_list.c": "static const FFBitStreamFilter * const bitstream_filters[] = {\n    &ff_null_bsf,\n    NULL };\n",
-        "libavfilter/filter_list.c": "static const FFFilter * const filter_list[] = {\n    &ff_vf_scale,\n    &ff_af_aresample,\n    NULL };\n",
-        "libavdevice/indev_list.c": "static const FFInputFormat * const indev_list[] = {\n    &ff_lavfi_demuxer,\n    NULL };\n",
-        "libavdevice/outdev_list.c": "static const FFOutputFormat * const outdev_list[] = {\n    &ff_audiotoolbox_muxer,\n    NULL };\n",
-    }
-    for dosya, icerik in ornek.items():
+    for dosya, girdiler in KUME_ORNEK.items():
         if dosya in atla:
             continue
+        icerik = _liste_dosyasi(dosya, girdiler)
         if degistir and dosya in degistir:
-            icerik = degistir[dosya]
+            deger = degistir[dosya]
+            icerik = deger if isinstance(deger, str) else _liste_dosyasi(dosya, deger)
         _yaz(os.path.join(ff, *dosya.split("/")), icerik.encode())
     return ff
 
@@ -2465,14 +2511,51 @@ def _selftest_icerik(s, kok):
     check_dene("otool: ana makine yolu", "izinli olmayan", otool=_otool_sahte(dep_l=["/opt/homebrew/lib/libfoo.dylib"]))
     check_dene("otool: mutlak rpath", "LC_RPATH", otool=_otool_sahte(rpath="/Users/runner/x"))
     check_dene("otool: kimlik @rpath değil", "LC_ID_DYLIB", otool=_otool_sahte(kimlik="/usr/local/lib/x.dylib"))
-    check_dene("küme: ek protokol", "protokol", kume_degistir={"libavformat/protocol_list.c": "&ff_file_protocol,\n&ff_pipe_protocol,\n"})
-    check_dene("küme: ağ protokolü", "protokol", kume_degistir={"libavformat/protocol_list.c": "&ff_file_protocol,\n&ff_http_protocol,\n"})
+    check_dene("küme: ek protokol", "protokol", kume_degistir={"libavformat/protocol_list.c": ["file_protocol", "pipe_protocol"]})
+    check_dene("küme: ağ protokolü", "protokol", kume_degistir={"libavformat/protocol_list.c": ["file_protocol", "http_protocol"]})
     for d in YASAK_DEMUXER:
-        check_dene("küme: %s demuxer" % d, d, kume_degistir={"libavformat/demuxer_list.c": "&ff_mov_demuxer,\n&ff_%s_demuxer,\n" % d})
-    check_dene("küme: tee muxer", "tee", kume_degistir={"libavformat/muxer_list.c": "&ff_mp4_muxer,\n&ff_tee_muxer,\n"})
-    check_dene("küme: boş liste", "boş", kume_degistir={"libavformat/muxer_list.c": "NULL };\n"})
-    check_dene("küme: tanınmayan soneki", "soneki", kume_degistir={"libavformat/muxer_list.c": "&ff_mp4_foo,\n"})
+        check_dene("küme: %s demuxer" % d, d, kume_degistir={"libavformat/demuxer_list.c": ["mov_demuxer", "%s_demuxer" % d]})
+    check_dene("küme: tee muxer", "tee", kume_degistir={"libavformat/muxer_list.c": ["mp4_muxer", "tee_muxer"]})
+    check_dene("küme: tanınmayan soneki", "soneki", kume_degistir={"libavformat/muxer_list.c": ["mp4_foo"]})
     check_dene("küme: liste dosyası yok", "yok", kume_atla=("libavcodec/bsf_list.c",))
+
+    # --- derlenmiş listelerin üretecin dilbilgisiyle sıkı ayrıştırılması (SK-943-2, SK-943-3) ---
+    s.tamam("KUME_DOSYALARI: dokuz liste, yapı ve dizi adları configure@946fcce'den elle yazılmış tabloyla aynı",
+            sorted((d, y, a) for _, d, _, y, a in KUME_DOSYALARI) == sorted((d, y, a) for d, (y, a) in KUME_GERCEK.items()) and len(KUME_DOSYALARI) == 9
+            and KUME_DOSYALARI[-1][0] == "outdev" and BOS_BEKLENEN_TUR == "outdev")
+    gercek_outdev = b"static const FFOutputFormat * const outdev_list[] = {\n    NULL };\n"
+    s.tamam("kume_dosyasi_ayristir: elle yazılmış gerçek boş outdev dosyası boş liste verir",
+            kume_dosyasi_ayristir(gercek_outdev, "FFOutputFormat", "outdev_list", "o") == [] and _liste_dosyasi("libavdevice/outdev_list.c", []).encode() == gercek_outdev)
+    s.tamam("kume_dosyasi_ayristir: girdiler sırayla",
+            kume_dosyasi_ayristir(b"static const FFCodecParser * const parser_list[] = {\n    &ff_aac_parser,\n    &ff_h264_parser,\n    NULL };\n", "FFCodecParser", "parser_list", "p") == ["aac_parser", "h264_parser"])
+    kume_ok = derlenmis_kume(ff)
+    s.tamam("check olumlu: elle yazılmış gerçek biçim: protokol {file}, outdev girdisi yok, indev avfoundation ve lavfi, filter_list'in koşulsuz girdileri",
+            set(n for t, n in kume_ok if t == "protocol") == set(["file"]) and not [1 for t, _ in kume_ok if t == "outdev"]
+            and set(n for t, n in kume_ok if t == "indev") == set(["lavfi", "avfoundation"]) and ("filter", "vsink_buffer") in kume_ok)
+    check_dene("küme: outdev'de audiotoolbox muxer'ı", "outdev kümesi boş değil", kume_degistir={"libavdevice/outdev_list.c": ["audiotoolbox_muxer"]})
+    check_dene("küme: outdev'de tek bilinmeyen girdi", "outdev kümesi boş değil", kume_degistir={"libavdevice/outdev_list.c": ["x_muxer"]})
+    check_dene("küme: outdev dosyası yok", "yok", kume_atla=("libavdevice/outdev_list.c",))
+    for dosya_ in sorted(KUME_ORNEK):
+        if dosya_ != "libavdevice/outdev_list.c":
+            check_dene("küme: boş liste (%s)" % dosya_, "küme listesi boş", kume_degistir={dosya_: []})
+        icerik_ = _liste_dosyasi(dosya_, KUME_ORNEK[dosya_])
+        check_dene("küme: yanlış yapı adı (%s)" % dosya_, "başlık", kume_degistir={dosya_: _liste_dosyasi(dosya_, KUME_ORNEK[dosya_], yapi="AVCodecParser")})
+        check_dene("küme: CRLF (%s)" % dosya_, "başlık", kume_degistir={dosya_: icerik_.replace("\n", "\r\n")})
+        check_dene("küme: NULL sonlandırıcısı yok (%s)" % dosya_, "başlık" if KUME_ORNEK[dosya_] == [] else "NULL", kume_degistir={dosya_: icerik_[:-len("    NULL };\n")]})
+        check_dene("küme: son satır sonu yok (%s)" % dosya_, "başlık" if KUME_ORNEK[dosya_] == [] else "NULL", kume_degistir={dosya_: icerik_[:-1]})
+        check_dene("küme: fazladan satır (%s)" % dosya_, "beklenmeyen satır", kume_degistir={dosya_: icerik_[:-len("    NULL };\n")] + "    // not\n    NULL };\n"})
+        check_dene("küme: ikinci NULL (%s)" % dosya_, "beklenmeyen satır", kume_degistir={dosya_: icerik_ + "    NULL };\n"})
+        check_dene("küme: sonlandırıcıdan sonra çöp (%s)" % dosya_, "NULL", kume_degistir={dosya_: icerik_ + "x\n"})
+        check_dene("küme: boş dosya (%s)" % dosya_, "başlık", kume_degistir={dosya_: ""})
+        check_dene("küme: yalnız başlık (%s)" % dosya_, "başlık", kume_degistir={dosya_: icerik_.split("\n")[0] + "\n"})
+    check_dene("küme: girintisiz girdi", "beklenmeyen satır", kume_degistir={"libavformat/muxer_list.c": _liste_dosyasi("libavformat/muxer_list.c", []).replace("    NULL", "&ff_mp4_muxer,\n    NULL")})
+    check_dene("küme: virgülsüz girdi", "beklenmeyen satır", kume_degistir={"libavformat/muxer_list.c": _liste_dosyasi("libavformat/muxer_list.c", []).replace("    NULL", "    &ff_mp4_muxer\n    NULL")})
+    check_dene("küme: virgülden önce boşluk", "beklenmeyen satır", kume_degistir={"libavformat/muxer_list.c": _liste_dosyasi("libavformat/muxer_list.c", []).replace("    NULL", "    &ff_mp4_muxer ,\n    NULL")})
+    check_dene("küme: sekme girintisi", "beklenmeyen satır", kume_degistir={"libavformat/muxer_list.c": _liste_dosyasi("libavformat/muxer_list.c", []).replace("    NULL", "\t&ff_mp4_muxer,\n    NULL")})
+    check_dene("küme: aynı satırda iki girdi", "beklenmeyen satır", kume_degistir={"libavformat/muxer_list.c": _liste_dosyasi("libavformat/muxer_list.c", []).replace("    NULL", "    &ff_mp4_muxer, &ff_null_muxer,\n    NULL")})
+    check_dene("küme: yinelenen girdi", "yinelenen", kume_degistir={"libavformat/demuxer_list.c": ["mov_demuxer", "mp3_demuxer", "mov_demuxer"]})
+    check_dene("küme: boş satır", "beklenmeyen satır", kume_degistir={"libavformat/muxer_list.c": _liste_dosyasi("libavformat/muxer_list.c", []).replace("    NULL", "\n    NULL")})
+    check_dene("küme: outdev'de yalnız iki NULL", "beklenmeyen satır", kume_degistir={"libavdevice/outdev_list.c": _liste_dosyasi("libavdevice/outdev_list.c", []) + "    NULL };\n"})
 
     # --- brotli yok (patches/05): otool -L ve ikili baytları ---
     brotli_ikili = {"libavcodec.xcframework/%s/libavcodec.framework/libavcodec" % DILIMLER[0]: b"\xcf\xfa\xed\xfe_BrotliDecoderDecompress\x00"}

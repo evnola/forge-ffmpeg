@@ -2575,6 +2575,7 @@ def _selftest_icerik(s, kok):
         check_dene("küme: boş dosya (%s)" % dosya_, "başlık", kume_degistir={dosya_: ""})
         check_dene("küme: yalnız başlık (%s)" % dosya_, "başlık", kume_degistir={dosya_: icerik_.split("\n")[0] + "\n"})
     check_dene("küme: girintisiz girdi", "beklenmeyen satır", kume_degistir={"libavformat/muxer_list.c": _liste_dosyasi("libavformat/muxer_list.c", []).replace("    NULL", "&ff_mp4_muxer,\n    NULL")})
+    check_dene("küme: girdi satırında CR", "beklenmeyen satır", kume_degistir={"libavformat/muxer_list.c": _liste_dosyasi("libavformat/muxer_list.c", []).replace("    NULL", "    &ff_mp4_muxer,\r\n    NULL")})
     check_dene("küme: virgülsüz girdi", "beklenmeyen satır", kume_degistir={"libavformat/muxer_list.c": _liste_dosyasi("libavformat/muxer_list.c", []).replace("    NULL", "    &ff_mp4_muxer\n    NULL")})
     check_dene("küme: virgülden önce boşluk", "beklenmeyen satır", kume_degistir={"libavformat/muxer_list.c": _liste_dosyasi("libavformat/muxer_list.c", []).replace("    NULL", "    &ff_mp4_muxer ,\n    NULL")})
     check_dene("küme: sekme girintisi", "beklenmeyen satır", kume_degistir={"libavformat/muxer_list.c": _liste_dosyasi("libavformat/muxer_list.c", []).replace("    NULL", "\t&ff_mp4_muxer,\n    NULL")})

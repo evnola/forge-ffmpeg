@@ -2446,6 +2446,9 @@ def _selftest_icerik(s, kok):
     s.kirmizi_olmali("brotli ölçümü (b): kurulan ftoption.h hiç yok (ağaçtaki kopya yetmez)", lambda: freetype_brotli_olcumu(brotli_kur(ft=None)), "ftoption.h bulunamadı")
     s.tamam("check_tam: freetype_brotli_olcumu'nu da çağırır", "freetype_brotli_olcumu" in cagri_sirasi("check_tam"))
     s.tamam("derleme env: izin listesi boş liste verir", env_sorunlari(dict((a, "x") for a in ENV_IZINLI)) == [] and set(temiz_env()) <= ENV_IZINLI)
+    # SK-941-6: izin listesi herkese açık tanı artifact'ının tek ortam denetimidir; ad eklemek security turu gerektirir (SK-941-5).
+    s.tamam("derleme env: izin listesi tam eşitlikle sekiz ad",
+            ENV_IZINLI == frozenset(["PATH", "HOME", "TMPDIR", "LANG", "GIT_TERMINAL_PROMPT", "DEVELOPER_DIR", "ACLOCAL_PATH", "SED"]))
     s.tamam("derleme env: PKG_CONFIG_PATH adıyla kırmızı", any("tanımlı olmamalı" in x for x in env_sorunlari(dict(temiz_env(), PKG_CONFIG_PATH="/opt/homebrew/lib/pkgconfig"))))
     s.tamam("derleme env: izinli olmayan değişken kırmızı", any("izinli olmayan" in x for x in env_sorunlari(dict(temiz_env(), CFLAGS="-O2"))))
     eski_pc = os.environ.get("PKG_CONFIG_PATH")
@@ -2573,6 +2576,26 @@ def _yml_adim_blogu(yml, ad):
     uygun = [p for p in parcalar[1:] if p.split("\n", 1)[0].strip() == ad]
     kirmizi_if(len(uygun) != 1, "build.yml: %s adımı tam bir kez bulunmalı" % ad)
     return uygun[0]
+
+
+def _yml_is_izinleri(yml, is_adi):
+    """build.yml'de işin `permissions` girdileri (örn. ["contents: read"]); iş ve blok tam bir kez bulunmalı, satır içi biçim kabul edilmez."""
+    satirlar = yml.split("\n")
+    bas = [i for i, l in enumerate(satirlar) if l == "  %s:" % is_adi]
+    kirmizi_if(len(bas) != 1, "build.yml: %s işi tam bir kez bulunmalı" % is_adi)
+    govde = []
+    for l in satirlar[bas[0] + 1:]:
+        if re.match(r"\S|  \S", l):
+            break
+        govde.append(l)
+    idx = [i for i, l in enumerate(govde) if l == "    permissions:"]
+    kirmizi_if(len(idx) != 1, "build.yml: %s işinde permissions bloğu tam bir kez bulunmalı" % is_adi)
+    girdiler = []
+    for l in govde[idx[0] + 1:]:
+        if not l.startswith("      "):
+            break
+        girdiler.append(l.strip())
+    return girdiler
 
 
 def _selftest_tani(s, kok):
@@ -2722,6 +2745,12 @@ def _selftest_tani(s, kok):
     s.tamam("build.yml: her uses tam commit SHA'sına sabit", len(kullanimlar) >= 4 and all(re.fullmatch(r"[A-Za-z0-9_./-]+@[0-9a-f]{40}", u) for u in kullanimlar))
     kod_satirlari = "\n".join(l for l in yml.split("\n") if not l.strip().startswith("#"))
     s.tamam("build.yml: secrets ve cache yok", "secrets." not in kod_satirlari and "actions/cache" not in kod_satirlari)
+    # SK-941-6: tanı artifact'ı herkese açık sayılır; derleme işinin belirteci yalnız okuyabilir (id-token ve yazma izni yok).
+    try:
+        is_izni = _yml_is_izinleri(yml, "build")
+    except Kirmizi as e:
+        is_izni = [str(e)]
+    s.tamam("build.yml: build işinin izni yalnız contents: read", is_izni == ["contents: read"])
     try:
         topla = _yml_adim_blogu(yml, "Tanı kayıtlarını topla")
         yukle = _yml_adim_blogu(yml, "Tanı kayıtlarını yükle")

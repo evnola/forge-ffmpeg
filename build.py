@@ -796,6 +796,14 @@ TANI_LOG_SON = 2 * 1024 * 1024
 TANI_DOSYA_SON = 256 * 1024
 TANI_TOPLAM = 24 * 1024 * 1024
 TANI_DOSYA_ADLARI = frozenset(["config.log", "meson-log.txt", "CMakeError.log", "CMakeOutput.log"])
+# FFmpeg kaynak ağacından (work/src/ffmpeg) tam göreli adlarla toplanan 11 dosya (SK-943-7): derlenmiş küme listelerinin gerçek baytları,
+# configure'ın yazdığı yapılandırma dizesi (config.h, config.fate). Glob yok; başka ad eklemek yeni bir güvenlik turu ister.
+TANI_FFMPEG_DOSYALARI = (
+    "libavformat/protocol_list.c", "libavformat/demuxer_list.c", "libavformat/muxer_list.c",
+    "libavcodec/codec_list.c", "libavcodec/parser_list.c", "libavcodec/bsf_list.c",
+    "libavfilter/filter_list.c", "libavdevice/indev_list.c", "libavdevice/outdev_list.c",
+    "ffbuild/config.fate", "config.h",
+)
 
 
 def _bas_son(yol, bas, son):
@@ -815,7 +823,8 @@ def _tani_yaz(hedef, veri):
 
 
 def tani_topla(work, out):
-    """work'teki build.log (baş+son), kütüphane günlükleri ve prebuilt dizin listesi out'a (yeni dizin) gizlenerek ve sınırlı kopyalanır."""
+    """work'teki build.log (baş+son), kütüphane günlükleri, FFmpeg derlenmiş küme listeleri ve yapılandırma dosyaları (TANI_FFMPEG_DOSYALARI) ve prebuilt dizin listesi
+    out'a (yeni dizin) gizlenerek ve sınırlı kopyalanır."""
     if not os.path.isdir(work):
         print("tani: çalışma dizini yok, toplanacak bir şey yok")
         return 0
@@ -848,6 +857,23 @@ def tani_topla(work, out):
                 _tani_yaz(os.path.join(out, goreli), veri)
                 toplam += len(veri)
                 indeks.append("%s: kaynak %d bayt, yazılan %d bayt" % (goreli, boyut, len(veri)))
+    ffmpeg_agaci = agac_yolu(work, "ffmpeg")
+    for goreli in TANI_FFMPEG_DOSYALARI:
+        yol = os.path.join(ffmpeg_agaci, *goreli.split("/"))
+        ad = os.path.relpath(yol, work).replace(os.sep, "__")
+        # Yolun hiçbir bileşeni (work altında) sembolik bağ olamaz: bağ izlenip dışarıdaki bir dosya artifact'a girmesin.
+        bilesenler = os.path.relpath(yol, work).split(os.sep)
+        bag = any(os.path.islink(os.path.join(work, *bilesenler[:n])) for n in range(1, len(bilesenler) + 1))
+        if bag or not os.path.isfile(yol):
+            indeks.append("%s: yok ya da sembolik bağ, alınmadı" % ad)
+            continue
+        if toplam >= TANI_TOPLAM:
+            indeks.append("%s: toplam sınırı aşıldı, alınmadı" % ad)
+            continue
+        veri, boyut = _bas_son(yol, TANI_DOSYA_SON, 0)
+        _tani_yaz(os.path.join(out, ad), veri)
+        toplam += len(veri)
+        indeks.append("%s: kaynak %d bayt, yazılan %d bayt" % (ad, boyut, len(veri)))
     prebuilt = os.path.join(work, "prebuilt")
     satirlar = []
     if os.path.isdir(prebuilt):
@@ -2890,6 +2916,16 @@ def _selftest_tani(s, kok):
     _yaz(os.path.join(cwork, "src", "expat", "expat", "config.log"), b"configure basladi\n")
     _yaz(os.path.join(cwork, "src", "ffmpeg", "build", "meson-logs", "meson-log.txt"), b"eski satir\n" * 100000 + b"meson son\n")
     _yaz(os.path.join(cwork, "src", "foo", "baska.txt"), b"alinmaz\n")
+    ffm = os.path.join(cwork, "src", "ffmpeg")
+    ffmpeg_adlari = ["libavformat/protocol_list.c", "libavformat/demuxer_list.c", "libavformat/muxer_list.c", "libavcodec/codec_list.c", "libavcodec/parser_list.c",
+                     "libavcodec/bsf_list.c", "libavfilter/filter_list.c", "libavdevice/indev_list.c", "libavdevice/outdev_list.c", "ffbuild/config.fate", "config.h"]
+    s.tamam("TANI_FFMPEG_DOSYALARI: SK-943-7'deki 11 tam ad (elle yazılmış liste)", sorted(TANI_FFMPEG_DOSYALARI) == sorted(ffmpeg_adlari))
+    for goreli_ in ffmpeg_adlari:
+        _yaz(os.path.join(ffm, *goreli_.split("/")), ("içerik " + goreli_ + "\n").encode())
+    _yaz(os.path.join(ffm, "config.h"), b"#define FFMPEG_CONFIGURATION \"--prefix=/x --enable-version3\"\nAPI_TOKEN=cok-gizli\n")
+    _yaz(os.path.join(ffm, "ffbuild", "config.mak"), b"alinmaz\n")
+    _yaz(os.path.join(ffm, "libavformat", "allformats.c"), b"alinmaz\n")
+    _yaz(os.path.join(ffm, "libavformat", "demuxer_list.c.bak"), b"alinmaz\n")
     _yaz(os.path.join(cwork, "prebuilt", "arm64-apple-ios", "libpng", "x"), b"x")
     _yaz(os.path.join(cwork, "prebuilt", "arm64-apple-ios", "expat", "x"), b"x")
     if os.name == "posix":
@@ -2897,7 +2933,13 @@ def _selftest_tani(s, kok):
     cout = os.path.join(kok, "tani-out")
     s.tamam("tani_topla: çıkış kodu 0", tani_topla(cwork, cout) == 0)
     s.tamam("tani_topla: yalnız beklenen dosyalar",
-            sorted(os.listdir(cout)) == sorted(["build.log", "indeks.txt", "prebuilt-liste.txt", "src__expat__expat__config.log", "src__ffmpeg__build__meson-logs__meson-log.txt"]))
+            sorted(os.listdir(cout)) == sorted(["build.log", "indeks.txt", "prebuilt-liste.txt", "src__expat__expat__config.log", "src__ffmpeg__build__meson-logs__meson-log.txt"]
+                                               + ["src__ffmpeg__" + g.replace("/", "__") for g in ffmpeg_adlari]))
+    with open(os.path.join(cout, "src__ffmpeg__libavdevice__outdev_list.c"), "rb") as f:
+        s.tamam("tani_topla: FFmpeg küme listesi içeriği aynen", f.read() == b"i\xc3\xa7erik libavdevice/outdev_list.c\n")
+    with open(os.path.join(cout, "src__ffmpeg__config.h"), "rb") as f:
+        ffconfig_cikti = f.read()
+    s.tamam("tani_topla: config.h alınır ve gizlenir", b"--enable-version3" in ffconfig_cikti and b"cok-gizli" not in ffconfig_cikti and b"API_TOKEN=***" in ffconfig_cikti)
     with open(os.path.join(cout, "build.log"), "rb") as f:
         log_cikti = f.read()
     s.tamam("tani_topla: build.log sınırlı (baş+son), atlanan bayt yazılı", len(log_cikti) <= TANI_LOG_BAS + TANI_LOG_SON + 200 and b"bayt atland" in log_cikti)
@@ -2912,6 +2954,13 @@ def _selftest_tani(s, kok):
     with open(os.path.join(cout, "prebuilt-liste.txt"), "rb") as f:
         s.tamam("tani_topla: prebuilt listesi", b"prebuilt/arm64-apple-ios/libpng" in f.read())
     s.kirmizi_olmali("tani_topla: çıktı dizini varsa kırmızı", lambda: tani_topla(cwork, cout), "zaten var")
+    _yaz(os.path.join(cwork, "src", "ffmpeg", "libavcodec", "codec_list.c"), b"x" * (TANI_DOSYA_SON + 5000) + b"SON\n")
+    buyuk_out = os.path.join(kok, "tani-buyuk")
+    tani_topla(cwork, buyuk_out)
+    s.tamam("tani_topla: büyük FFmpeg dosyası TANI_DOSYA_SON ile sınırlı, atlanan bayt yazılı",
+            TANI_DOSYA_SON <= os.path.getsize(os.path.join(buyuk_out, "src__ffmpeg__libavcodec__codec_list.c")) <= TANI_DOSYA_SON + 100)
+    with open(os.path.join(buyuk_out, "src__ffmpeg__libavcodec__codec_list.c"), "rb") as f:
+        s.tamam("tani_topla: büyük FFmpeg dosyasının başı korunur", f.read(10) == b"x" * 10)
     s.tamam("tani_topla: çalışma dizini yoksa 0 ve çıktı oluşmaz", tani_topla(os.path.join(kok, "yok-work"), os.path.join(kok, "yok-out")) == 0 and not os.path.exists(os.path.join(kok, "yok-out")))
     if os.name == "posix":
         bag_work = os.path.join(kok, "tani-bag-work")
@@ -2921,6 +2970,20 @@ def _selftest_tani(s, kok):
         bag_out = os.path.join(kok, "tani-bag-out")
         tani_topla(bag_work, bag_out)
         s.tamam("tani_topla: build.log sembolik bağsa izlenmez", not os.path.exists(os.path.join(bag_out, "build.log")))
+        # FFmpeg dosyası sembolik bağ ya da yolun bir dizini sembolik bağ ise izlenmez; indekste yazılır.
+        ffbag_work = os.path.join(kok, "tani-ffbag-work")
+        _yaz(os.path.join(kok, "tani-ffbag-hedef", "config.h"), b"gizli-icerik\n")
+        _yaz(os.path.join(kok, "tani-ffbag-hedef", "libavformat", "demuxer_list.c"), b"gizli-icerik\n")
+        _yaz(os.path.join(ffbag_work, "src", "ffmpeg", "libavcodec", "codec_list.c"), b"gercek\n")
+        os.symlink(os.path.join(kok, "tani-ffbag-hedef", "config.h"), os.path.join(ffbag_work, "src", "ffmpeg", "config.h"))
+        os.symlink(os.path.join(kok, "tani-ffbag-hedef", "libavformat"), os.path.join(ffbag_work, "src", "ffmpeg", "libavformat"))
+        ffbag_out = os.path.join(kok, "tani-ffbag-out")
+        tani_topla(ffbag_work, ffbag_out)
+        with open(os.path.join(ffbag_out, "indeks.txt"), "rb") as f:
+            ffbag_indeks = f.read().decode()
+        s.tamam("tani_topla: sembolik bağlı FFmpeg dosyası ve dizini izlenmez, yalnız gerçek dosya alınır",
+                sorted(d for d in os.listdir(ffbag_out) if d.startswith("src__")) == ["src__ffmpeg__libavcodec__codec_list.c"]
+                and "src__ffmpeg__config.h: yok ya da sembolik bağ" in ffbag_indeks and "gizli-icerik" not in ffbag_indeks)
     eski_toplam = globals()["TANI_TOPLAM"]
     try:
         globals()["TANI_TOPLAM"] = 1
@@ -2931,6 +2994,15 @@ def _selftest_tani(s, kok):
     with open(os.path.join(sinir_out, "indeks.txt"), "rb") as f:
         s.tamam("tani_topla: toplam sınırı aşılınca günlük dosyaları alınmaz ve indekste yazar",
                 b"toplam s" in f.read() and not os.path.exists(os.path.join(sinir_out, "src__expat__expat__config.log")))
+    s.tamam("tani_topla: toplam sınırı FFmpeg dosyaları için de geçerli", not os.path.exists(os.path.join(sinir_out, "src__ffmpeg__config.h")))
+    eksik_work = os.path.join(kok, "tani-eksik-work")
+    _yaz(os.path.join(eksik_work, "src", "ffmpeg", "config.h"), b"x\n")
+    eksik_out = os.path.join(kok, "tani-eksik-out")
+    tani_topla(eksik_work, eksik_out)
+    with open(os.path.join(eksik_out, "indeks.txt"), "rb") as f:
+        eksik_indeks = f.read().decode()
+    s.tamam("tani_topla: olmayan FFmpeg dosyası indekste 'yok' diye yazılır, çökmez",
+            "src__ffmpeg__libavdevice__outdev_list.c: yok ya da sembolik bağ" in eksik_indeks and os.path.isfile(os.path.join(eksik_out, "src__ffmpeg__config.h")))
 
     # --- iş akışı (build.yml) ---
     yol = os.path.join(HERE, ".github", "workflows", "build.yml")

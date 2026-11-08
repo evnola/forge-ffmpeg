@@ -1,0 +1,13 @@
+{
+  "id": "05-freetype-brotli-off",
+  "tree": "ffmpeg-kit-next",
+  "file": "scripts/apple/freetype.sh",
+  "op": "replace",
+  "anchor": "  --with-brotli=yes \\\n",
+  "text": "  --with-brotli=no \\\n",
+  "project": "FFmpegKitNext (https://github.com/arthenica/ffmpeg-kit-next)",
+  "license": "LGPL-3.0, the license of the project this patch modifies",
+  "date": "2026-11-08",
+  "notice": "Modified by Evnola OU on 2026-11-08: the FreeType configure option --with-brotli=yes in scripts/apple/freetype.sh is changed to --with-brotli=no.",
+  "reason": "brotli is not a locked source, so FreeType's configure would stop with 'brotli support requested but library not found'. Building FreeType without brotli also closes the WOFF2 decoding path for fonts that come from untrusted subtitle files."
+}

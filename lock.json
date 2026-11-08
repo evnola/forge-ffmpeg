@@ -1,0 +1,103 @@
+{
+  "schema": 1,
+  "sources": [
+    {
+      "name": "ffmpeg-kit-next",
+      "url": "https://github.com/arthenica/ffmpeg-kit-next",
+      "ref": "v9.0.2",
+      "version": "9.0.2",
+      "commit": "9f04bf1e3c97def70b98e198cb80a57b43ef5b45"
+    },
+    {
+      "name": "ffmpeg",
+      "url": "https://github.com/arthenica/FFmpeg",
+      "ref": "n9.0.2",
+      "version": "9.0.2",
+      "commit": "946fcce07b6dcd0331c8cc609192aeff5e1924f8"
+    },
+    {
+      "name": "expat",
+      "url": "https://github.com/arthenica/libexpat",
+      "ref": "R_2_9_0",
+      "version": "2.9.0",
+      "commit": "a76b1174c1ea52abb639a4c69d52b630a8a106a2"
+    },
+    {
+      "name": "fontconfig",
+      "url": "https://github.com/arthenica/fontconfig",
+      "ref": "2.18.1",
+      "version": "2.18.1",
+      "commit": "d87ec67db56518e9e9c36ff38f151dfc9b728b2e"
+    },
+    {
+      "name": "freetype",
+      "url": "https://github.com/arthenica/freetype2",
+      "ref": "VER-2-14-3",
+      "version": "2.14.3",
+      "commit": "0a0221a1347e2f1e07c395263540026e9a0aa7c7"
+    },
+    {
+      "name": "fribidi",
+      "url": "https://github.com/arthenica/fribidi",
+      "ref": "v1.0.16",
+      "version": "1.0.16",
+      "commit": "68162babff4f39c4e2dc164a5e825af93bda9983"
+    },
+    {
+      "name": "harfbuzz",
+      "url": "https://github.com/arthenica/harfbuzz",
+      "ref": "14.2.1",
+      "version": "14.2.1",
+      "commit": "56feae4035bdd48f62ba2b8d8c16232d4d89b3a4"
+    },
+    {
+      "name": "lame",
+      "url": "https://github.com/arthenica/lame",
+      "ref": "RELEASE__3_100",
+      "version": "3.100",
+      "commit": "b8f6b9e0fdbfb6fecfc106e8d24af240eac44b22"
+    },
+    {
+      "name": "libass",
+      "url": "https://github.com/arthenica/libass",
+      "ref": "0.17.4",
+      "version": "0.17.4",
+      "commit": "bbb3c7f1570a4a021e52683f3fbdf74fe492ae84"
+    },
+    {
+      "name": "libpng",
+      "url": "https://github.com/arthenica/libpng",
+      "ref": "v1.6.58",
+      "version": "1.6.58",
+      "commit": "3061454d980de7d53608f594194cfac722721d2a"
+    },
+    {
+      "name": "libvpx",
+      "url": "https://github.com/arthenica/libvpx",
+      "ref": "v1.16.0",
+      "version": "1.16.0",
+      "commit": "1024874c5919305883187e2953de8fcb4c3d7fa6"
+    },
+    {
+      "name": "opus",
+      "url": "https://github.com/arthenica/opus",
+      "ref": "v1.5.2",
+      "version": "1.5.2",
+      "commit": "ddbe48383984d56acd9e1ab6a090c54ca6b735a6"
+    },
+    {
+      "name": "config",
+      "url": "https://github.com/arthenica/gnu-config",
+      "ref": "v20210814",
+      "version": "20210814",
+      "commit": "805517123cbfe33d17c989a18e78c5789fab0437"
+    },
+    {
+      "name": "dlg",
+      "url": "https://github.com/nyorain/dlg",
+      "ref": "395ccad2c1e0daae535c4d20bb0a3f2424648e17",
+      "version": "master 2025-07-20",
+      "commit": "395ccad2c1e0daae535c4d20bb0a3f2424648e17"
+    }
+  ]
+}

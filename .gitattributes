@@ -1,0 +1,4 @@
+* text=auto eol=lf
+lock.json -text
+LICENSE -text
+patches/** -text

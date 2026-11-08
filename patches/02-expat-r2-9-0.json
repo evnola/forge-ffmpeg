@@ -1,0 +1,13 @@
+{
+  "id": "02-expat-r2-9-0",
+  "tree": "ffmpeg-kit-next",
+  "file": "scripts/source.sh",
+  "op": "replace",
+  "anchor": "    SOURCE_REPO_URL=\"https://github.com/arthenica/libexpat\"\n    SOURCE_ID=\"R_2_8_1\"\n",
+  "text": "    SOURCE_REPO_URL=\"https://github.com/arthenica/libexpat\"\n    SOURCE_ID=\"R_2_9_0\"\n",
+  "project": "FFmpegKitNext (https://github.com/arthenica/ffmpeg-kit-next)",
+  "license": "LGPL-3.0, the license of the project this patch modifies",
+  "date": "2026-11-08",
+  "notice": "Modified by Evnola OU on 2026-11-08: the Expat tag in scripts/source.sh is changed from R_2_8_1 to R_2_9_0 so that the recipe matches the locked source.",
+  "reason": "The locked Expat source is R_2_9_0 (R_2_8_1 is affected by CVE-2026-66046). Next reuses the pre-fetched, non-empty src/expat directory, so this edit only keeps the recipe consistent with the lock."
+}

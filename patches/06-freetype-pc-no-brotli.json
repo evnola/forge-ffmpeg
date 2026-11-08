@@ -1,0 +1,13 @@
+{
+  "id": "06-freetype-pc-no-brotli",
+  "tree": "ffmpeg-kit-next",
+  "file": "scripts/function-apple.sh",
+  "op": "replace",
+  "anchor": "Requires.private: zlib, libbrotlidec\n",
+  "text": "Requires.private: zlib\n",
+  "project": "FFmpegKitNext (https://github.com/arthenica/ffmpeg-kit-next)",
+  "license": "LGPL-3.0, the license of the project this patch modifies",
+  "date": "2026-11-08",
+  "notice": "Modified by Evnola OU on 2026-11-08: in create_freetype_package_config of scripts/function-apple.sh, libbrotlidec is removed from the Requires.private line of the generated freetype2.pc.",
+  "reason": "FreeType is built without brotli (patch 05), so no libbrotlidec.pc exists, but the freetype2.pc that Next writes by hand still declares libbrotlidec as a private requirement. Every pkg-config consumer of freetype2 (fontconfig, libass, FFmpeg) would stop with 'Package libbrotlidec was not found'. The line declares a dependency that does not exist."
+}

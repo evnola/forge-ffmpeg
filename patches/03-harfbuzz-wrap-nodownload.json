@@ -1,0 +1,13 @@
+{
+  "id": "03-harfbuzz-wrap-nodownload",
+  "tree": "ffmpeg-kit-next",
+  "file": "scripts/apple/harfbuzz.sh",
+  "op": "insert_before",
+  "anchor": "  --buildtype=release \\\n",
+  "text": "  --wrap-mode=nodownload \\\n",
+  "project": "FFmpegKitNext (https://github.com/arthenica/ffmpeg-kit-next)",
+  "license": "LGPL-3.0, the license of the project this patch modifies",
+  "date": "2026-11-08",
+  "notice": "Modified by Evnola OU on 2026-11-08: the option --wrap-mode=nodownload is inserted into the meson setup call of scripts/apple/harfbuzz.sh, immediately before --buildtype=release.",
+  "reason": "HarfBuzz ships subprojects/*.wrap files; without this option meson may download a missing dependency during the build. With it, meson fails instead, so nothing outside the lock is fetched."
+}

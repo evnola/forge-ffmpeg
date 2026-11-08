@@ -1,0 +1,13 @@
+{
+  "id": "01-configure-security-flags",
+  "tree": "ffmpeg-kit-next",
+  "file": "scripts/apple/ffmpeg.sh",
+  "op": "insert_before",
+  "anchor": "  ${CONFIGURE_POSTFIX} 1>>\"${BASEDIR}\"/build.log 2>&1\n",
+  "text": "  --disable-network \\\n  --disable-protocols \\\n  --enable-protocol=file \\\n  --disable-demuxer=hls,dash,concat,image2 \\\n  --disable-muxer=tee \\\n",
+  "project": "FFmpegKitNext (https://github.com/arthenica/ffmpeg-kit-next)",
+  "license": "LGPL-3.0, the license of the project this patch modifies",
+  "date": "2026-11-08",
+  "notice": "Modified by Evnola OU on 2026-11-08: five FFmpeg configure flags are inserted into the configure call of scripts/apple/ffmpeg.sh, immediately before ${CONFIGURE_POSTFIX}, in this order.",
+  "reason": "Build-time hardening: no network code, no protocol except file, and no hls, dash, concat or image2 demuxer and no tee muxer in the compiled FFmpeg."
+}

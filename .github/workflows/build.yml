@@ -1,0 +1,149 @@
+# build.yml
+# Forge FFmpeg (V15): derleme ve yayım iş akışı.
+# Tetikleyiciler yalnız workflow_dispatch (deneme derlemesi: release ve attestation yok) ve v* etiketi (release).
+# Secret yok, actions/cache yok; yalnız GitHub'ın kendi actions'ları, tam commit SHA'sıyla sabit.
+# runs-on değerleri düz dizedir (matris ya da ifade yok): fork araçları (provenance.py) bunları birebir okur.
+name: V15 derleme
+
+on:
+  workflow_dispatch:
+  push:
+    tags:
+      - 'v*'
+
+permissions: {}
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  selftest:
+    name: selftest
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    permissions:
+      contents: read
+    steps:
+      - name: Kaynağı al
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Selftest
+        run: python3 build.py selftest
+      - name: Selftest (python -O)
+        run: python3 -O build.py selftest
+
+  build:
+    name: build
+    needs: selftest
+    runs-on: macos-26
+    # Süre ve disk ölçülmedi; ilk dispatch koşusunda ölçülür.
+    timeout-minutes: 240
+    permissions:
+      contents: read
+    outputs:
+      sha256sums: ${{ steps.ozet.outputs.sha256sums }}
+    env:
+      DEVELOPER_DIR: /Applications/Xcode_26.6.app/Contents/Developer
+      HOMEBREW_NO_AUTO_UPDATE: '1'
+      HOMEBREW_NO_INSTALL_CLEANUP: '1'
+      HOMEBREW_NO_INSTALL_UPGRADE: '1'
+      HOMEBREW_NO_ANALYTICS: '1'
+    steps:
+      - name: Kaynağı al
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Xcode denetimi
+        run: |
+          surum="$(xcodebuild -version)"
+          echo "$surum"
+          printf '%s\n' "$surum" | grep -qx 'Build version 17F113'
+      - name: Homebrew araçları
+        # Liste FFmpegKitNext'in kendi iOS iş akışından alındı, ölçülmedi; imajda cmake, ninja ve pkgconf var.
+        run: brew install autoconf automake libtool gettext meson nasm yasm gperf bison ragel texinfo gtk-doc gnu-sed xz
+      - name: Derle
+        env:
+          REF_TYPE: ${{ github.ref_type }}
+          REF_NAME: ${{ github.ref_name }}
+          COMMIT_SHA: ${{ github.sha }}
+        run: |
+          if [ "$REF_TYPE" = "tag" ]; then
+            etiket="$REF_NAME"
+          else
+            etiket="deneme-${COMMIT_SHA:0:7}"
+          fi
+          python3 build.py all --work "$RUNNER_TEMP/work" --out "$RUNNER_TEMP/dist" --label "$etiket"
+      - name: SHA256SUMS özeti
+        id: ozet
+        # Komut ikamesindeki hata echo içinde yutulur; değer önce değişkene alınır ve biçimi denetlenir.
+        run: |
+          ozet="$(shasum -a 256 "$RUNNER_TEMP/dist/SHA256SUMS" | cut -d' ' -f1)"
+          [[ "$ozet" =~ ^[0-9a-f]{64}$ ]]
+          echo "sha256sums=$ozet" >> "$GITHUB_OUTPUT"
+      - name: Çıktıları yükle
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: ${{ github.event_name == 'workflow_dispatch' && format('deneme-{0}', github.run_id) || format('surum-{0}', github.run_id) }}
+          path: ${{ runner.temp }}/dist/
+          if-no-files-found: error
+          retention-days: ${{ github.event_name == 'workflow_dispatch' && 3 || 7 }}
+
+  release:
+    name: release
+    needs: build
+    if: github.event_name == 'push' && github.ref_type == 'tag' && startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    permissions:
+      contents: write
+      id-token: write
+      attestations: write
+    steps:
+      - name: Etiket biçimi
+        env:
+          ETIKET: ${{ github.ref_name }}
+        run: |
+          [[ "$ETIKET" =~ ^v[0-9]+\.[0-9]+\.[0-9]+-forge\.[0-9]+$ ]]
+      - name: Çıktıları indir
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: ${{ format('surum-{0}', github.run_id) }}
+          path: dist
+      - name: Özetleri yeniden hesapla ve karşılaştır
+        env:
+          BUILD_OZETI: ${{ needs.build.outputs.sha256sums }}
+        run: |
+          cd dist
+          sha256sum --check --strict SHA256SUMS
+          [ "$(sha256sum SHA256SUMS | cut -d' ' -f1)" = "$BUILD_OZETI" ]
+          [ "$(awk '{print $2}' SHA256SUMS | sort)" = "$(ls -1 | grep -vx 'SHA256SUMS' | sort)" ]
+      - name: Attestation
+        uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
+        with:
+          subject-path: dist/*
+      - name: Release (taslak, sonra yayın)
+        env:
+          GH_TOKEN: ${{ github.token }}
+          ETIKET: ${{ github.ref_name }}
+          DEPO: ${{ github.repository }}
+        run: |
+          # Sürümler sabit yazılmaz: FFmpeg sürümü etiketten, ikisi de attestation'lı source-lock.json'dan okunur;
+          # etiketle kilit uyuşmazsa yayım durur.
+          surumler="$(python3 -c '
+          import json, re, sys
+          k = dict((s["name"], s) for s in json.load(open(sys.argv[1]))["sources"])
+          m = re.fullmatch(r"v([0-9]+\.[0-9]+\.[0-9]+)-forge\.[0-9]+", sys.argv[2])
+          if m is None or m.group(1) != k["ffmpeg"]["version"]:
+              sys.exit(1)
+          print("FFmpegKitNext %s + FFmpeg %s" % (k["ffmpeg-kit-next"]["ref"], k["ffmpeg"]["ref"]))
+          ' dist/source-lock.json "$ETIKET")"
+          [[ "$surumler" =~ ^FFmpegKitNext\ v[0-9.]+\ \+\ FFmpeg\ n[0-9.]+$ ]]
+          {
+            echo "$surumler for the Forge app."
+            echo
+            echo "Corresponding source: forge-ffmpeg-src-${ETIKET}.tar.xz. Verification: see README.md, section 'Verify a release'."
+          } > "$RUNNER_TEMP/notes.md"
+          gh release create "$ETIKET" --repo "$DEPO" --draft --verify-tag --title "$ETIKET" --notes-file "$RUNNER_TEMP/notes.md" dist/*
+          gh release edit "$ETIKET" --repo "$DEPO" --draft=false

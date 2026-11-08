@@ -1,0 +1,13 @@
+{
+  "id": "04-freetype-autogen-no-submodule-fetch",
+  "tree": "freetype",
+  "file": "autogen.sh",
+  "op": "replace",
+  "anchor": "    git submodule update --init\n",
+  "text": "    echo \"forge-ffmpeg: subprojects/dlg kilitten gelmeli; ağdan alınmaz\" >&2\n    exit 1\n",
+  "project": "FreeType (https://github.com/arthenica/freetype2)",
+  "license": "FreeType License (FTL) or GNU GPL v2, the licenses of the project this patch modifies",
+  "date": "2026-11-08",
+  "notice": "Modified by Evnola OU on 2026-11-08: the line 'git submodule update --init' in autogen.sh of FreeType is replaced by an error message and 'exit 1'.",
+  "reason": "autogen.sh runs 'git submodule update --init' when subprojects/dlg/include/dlg is missing, which would download dlg from the network. The locked dlg is placed there by build.py before the build, so this branch is dead code; if the layout ever breaks, the build stops instead of fetching anything."
+}

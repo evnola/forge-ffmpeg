@@ -1,0 +1,13 @@
+{
+  "id": "07-freetype-no-libjxl-wait",
+  "tree": "ffmpeg-kit-next",
+  "file": "scripts/main-ios.sh",
+  "op": "replace",
+  "anchor": "      if [[ $OK_libpng -eq 1 ]] && [[ $OK_libjxl -eq 1 ]]; then\n",
+  "text": "      if [[ $OK_libpng -eq 1 ]]; then\n",
+  "project": "FFmpegKitNext (https://github.com/arthenica/ffmpeg-kit-next)",
+  "license": "LGPL-3.0, the license of the project this patch modifies",
+  "date": "2026-11-08",
+  "notice": "Modified by Evnola OU on 2026-11-08: in scripts/main-ios.sh, the freetype case of the library build loop no longer waits for OK_libjxl; the condition is reduced to OK_libpng.",
+  "reason": "Next enables libjxl whenever FreeType is enabled, and the build disables libjxl again (--disable-lib-libjxl), which is not locked and not part of the library set. A disabled library is never in the build list, so OK_libjxl is never set, the freetype branch never runs, and the loop that waits for dependencies never ends (the first trial run was silent for almost four hours). FreeType does not use libjxl, so the wait is removed."
+}

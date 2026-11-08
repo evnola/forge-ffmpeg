@@ -1710,6 +1710,34 @@ EOF
 }
 '''
 
+# Next scripts/main-ios.sh@9f04bf1e satır 49-72: kütüphane derleme döngüsünün başı ve fontconfig, freetype, gnutls, harfbuzz kolları
+# (freetype kolu OK_libjxl bekler; libjxl kapalıysa döngü hiç bitmez).
+NEXT_MAIN_IOS_SH = r'''while [ ${#enabled_library_list[@]} -gt $completed ]; do
+  for library in "${enabled_library_list[@]}"; do
+    let run=0
+    case $library in
+    fontconfig)
+      if [[ $OK_expat -eq 1 ]] && [[ $OK_freetype -eq 1 ]]; then
+        run=1
+      fi
+      ;;
+    freetype)
+      if [[ $OK_libpng -eq 1 ]] && [[ $OK_libjxl -eq 1 ]]; then
+        run=1
+      fi
+      ;;
+    gnutls)
+      if [[ $OK_nettle -eq 1 ]] && [[ $OK_gmp -eq 1 ]]; then
+        run=1
+      fi
+      ;;
+    harfbuzz)
+      if [[ $OK_freetype -eq 1 ]]; then
+        run=1
+      fi
+      ;;
+'''
+
 
 def _yama_agaclari(kok):
     work = os.path.join(kok, "work")
@@ -1719,6 +1747,7 @@ def _yama_agaclari(kok):
     _yaz(os.path.join(work, "scripts", "source.sh"), NEXT_SOURCE_SH.encode())
     _yaz(os.path.join(work, "src", "freetype", "autogen.sh"), FREETYPE_AUTOGEN_SH.encode())
     _yaz(os.path.join(work, "scripts", "function-apple.sh"), NEXT_FUNCTION_APPLE_SH.encode())
+    _yaz(os.path.join(work, "scripts", "main-ios.sh"), NEXT_MAIN_IOS_SH.encode())
     return work
 
 
@@ -2177,7 +2206,7 @@ def _selftest_icerik(s, kok):
     gercek_yamalar = os.path.join(HERE, "patches")
     # gerçek yamalar, Next'ten alınmış çapa bölgelerine uygulanır (ffmpeg.sh yaması ağaç adı Next'tir: work kökü)
     rapor = yama_uygula(gw, gercek_yamalar)
-    s.tamam("gerçek yamalar uygulanır (altı yama tanımı)", len(rapor) == 6)
+    s.tamam("gerçek yamalar uygulanır (yedi yama tanımı)", len(rapor) == 7)
     with open(os.path.join(gw, "scripts", "apple", "ffmpeg.sh"), "rb") as f:
         sonra = f.read().decode()
     # configure çağrısının belirteçleri: bayraklar POSTFIX'ten önce, bu sırayla
@@ -2209,10 +2238,22 @@ def _selftest_icerik(s, kok):
             and "Requires: libpng\nRequires.private: zlib\nLibs: -L\\${libdir} -lfreetype\n" in fa)
     s.tamam("function-apple.sh yaması: yalnız o satır değişir (blok geri kalanı aynı)",
             fa == NEXT_FUNCTION_APPLE_SH.replace("Requires.private: zlib, libbrotlidec\n", "Requires.private: zlib\n"))
+    with open(os.path.join(gw, "scripts", "main-ios.sh"), "rb") as f:
+        mi = f.read().decode()
+    eski_satir = "      if [[ $OK_libpng -eq 1 ]] && [[ $OK_libjxl -eq 1 ]]; then\n"
+    yeni_satir = "      if [[ $OK_libpng -eq 1 ]]; then\n"
+    s.tamam("main-ios.sh yaması (SK-941-2): OK_libjxl 0 kez, yeni satır 1 kez, eski satır yok",
+            mi.count("OK_libjxl") == 0 and mi.count(yeni_satir) == 1 and eski_satir not in mi)
+    s.tamam("main-ios.sh yaması: yalnız freetype koşulu değişir (geri kalanı aynı)", mi == NEXT_MAIN_IOS_SH.replace(eski_satir, yeni_satir))
+    kol_ = lambda metin, ad: metin[metin.index("    %s)\n" % ad):].split("      ;;\n")[0]
+    s.tamam("main-ios.sh yaması: fontconfig ve gnutls kolları bayt bayt aynı, fontconfig ve harfbuzz hâlâ OK_freetype bekler",
+            kol_(mi, "fontconfig") == kol_(NEXT_MAIN_IOS_SH, "fontconfig") and kol_(mi, "gnutls") == kol_(NEXT_MAIN_IOS_SH, "gnutls")
+            and "[[ $OK_freetype -eq 1 ]]" in kol_(mi, "fontconfig") and "[[ $OK_freetype -eq 1 ]]" in kol_(mi, "harfbuzz"))
     # gerçek freetype yamaları çapa yokken ya da iki kez varken uygulanmaz (SK-936-3, SK-938-4, brotli)
     for ad_, dosya_, parca_, iki_ in (("autogen.sh", ("src", "freetype", "autogen.sh"), FREETYPE_AUTOGEN_SH, "    git submodule update --init\n"),
                                       ("freetype.sh", ("scripts", "apple", "freetype.sh"), NEXT_FREETYPE_SH, "  --with-brotli=yes \\\n"),
-                                      ("function-apple.sh", ("scripts", "function-apple.sh"), NEXT_FUNCTION_APPLE_SH, "Requires.private: zlib, libbrotlidec\n")):
+                                      ("function-apple.sh", ("scripts", "function-apple.sh"), NEXT_FUNCTION_APPLE_SH, "Requires.private: zlib, libbrotlidec\n"),
+                                      ("main-ios.sh", ("scripts", "main-ios.sh"), NEXT_MAIN_IOS_SH, "      if [[ $OK_libpng -eq 1 ]] && [[ $OK_libjxl -eq 1 ]]; then\n")):
         fw_ = _yama_agaclari(os.path.join(kok, "yf-" + ad_))
         _yaz(os.path.join(fw_, *dosya_), (parca_ + iki_).encode())
         s.kirmizi_olmali("%s yaması: çapa iki kez bulunursa uygulanmaz" % ad_, lambda: yama_uygula(fw_, gercek_yamalar), "2 kez")

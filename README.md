@@ -186,6 +186,10 @@ All changes are applied by `build.py` (the patch files carry the date and the no
   (`Requires.private: zlib, libbrotlidec` becomes `Requires.private: zlib`). FreeType is built without brotli (patch 05),
   so no `libbrotlidec.pc` exists, and the unpatched line would stop every pkg-config user of `freetype2` (fontconfig,
   libass, FFmpeg).
+- `patches/07-freetype-no-libjxl-wait.json`: in the library build loop of `scripts/main-ios.sh` of FFmpegKitNext, the
+  `freetype` case no longer waits for libjxl (`[[ $OK_libpng -eq 1 ]] && [[ $OK_libjxl -eq 1 ]]` becomes
+  `[[ $OK_libpng -eq 1 ]]`). libjxl is disabled by `--disable-lib-libjxl`, so it is never built and `OK_libjxl` is never
+  set; without this patch the loop would wait for it forever. FreeType does not use libjxl.
 - libpng: no libpng patch is applied because `pngpriv.h` of the locked libpng does not contain the `TARGET_OS_MAC`
   condition. `build.py` measures this in the `patch` stage (the build fails if the condition appears) and records the
   result in `toolchain.txt`.

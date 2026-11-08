@@ -14,6 +14,7 @@ verify-lock (sonra), check, package. Ayrı ayrı da koşulabilirler; `--help` il
 """
 import argparse
 import ast
+import contextlib
 import hashlib
 import io
 import json
@@ -2521,8 +2522,260 @@ def _selftest_icerik(s, kok):
         s.tamam("%s altında bozuk ağaç çıkış kodu 1" % ad, p.returncode == 1 and b"KIRMIZI" in p.stderr)
     p = subprocess.run([sys.executable, os.path.abspath(__file__), "verify-lock", "--work", kok, "--lock", lp2, "--asama", "yanlis"], stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=120)
     s.tamam("kullanım hatası çıkış kodu 2", p.returncode == 2)
+    _selftest_tani(s, kok)
+    _selftest_bekci(s, kok)
 
 
+def _yml_adim_blogu(yml, ad):
+    """build.yml'deki adımın bütün metni (bir sonraki `- name:` satırına kadar); adım tam bir kez bulunmalı."""
+    parcalar = re.split(r"(?m)^      - name: ", yml)
+    uygun = [p for p in parcalar[1:] if p.split("\n", 1)[0].strip() == ad]
+    kirmizi_if(len(uygun) != 1, "build.yml: %s adımı tam bir kez bulunmalı" % ad)
+    return uygun[0]
+
+
+def _selftest_tani(s, kok):
+    """Derleme bekçisi, günlük gizleme ve tanı toplama (SK-893/936/938 kararları değişmeden; bunlar yalnız görünürlük ekler)."""
+    sahte_token = "gh" + "p_" + "a" * 36
+    sahte_pat = "github" + "_pat_" + "B" * 30
+
+    # --- gizleme ---
+    for ad, girdi, yasak, beklenen in (
+            ("URL kullanıcı:parola", "fatal: unable to access 'https://u:parola1@h.example/x'", "parola1", "://***@"),
+            ("GitHub belirteci", "x " + sahte_token + " y", sahte_token, "***"),
+            ("ince taneli belirteç", "x " + sahte_pat + " y", sahte_pat, "***"),
+            ("Authorization başlığı", "Authorization: Basic dXNlcjpwYXJvbGE=", "dXNlcjpwYXJvbGE", "Authorization: ***"),
+            ("Bearer", "header bearer abcdefgh12345678 x", "abcdefgh12345678", "bearer ***"),
+            ("GITHUB_TOKEN değişkeni", "GITHUB_TOKEN=cok-gizli", "cok-gizli", "GITHUB_TOKEN=***"),
+            ("küçük harfli api_key", "my_api" + "_key=cok-gizli", "cok-gizli", "my_api_key=***"),
+            ("PASSWORD değişkeni", "DB_PASSWORD=cok-gizli", "cok-gizli", "DB_PASSWORD=***")):
+        cikti = gizle(girdi)
+        s.tamam("gizle: %s gizlenir" % ad, yasak not in cikti and beklenen in cikti)
+    for zararsiz in ("PATH=/usr/bin:/bin", "CC=clang", "INFO: Skipping freetype, dependencies built=0, already built=", "HOME=/Users/runner",
+                     "https://github.com/arthenica/libexpat", "AUTHORS file"):
+        s.tamam("gizle: zararsız satır aynen kalır (%s)" % zararsiz[:30], gizle(zararsiz) == zararsiz)
+    s.tamam("gizle: satır sonuna taşmaz", gizle("A_TOKEN=x\nPATH=/bin\n") == "A_TOKEN=***\nPATH=/bin\n")
+
+    # --- git stderr özeti ---
+    s.tamam("git_hata_ozeti: boş stderr 'çıktı yok'", git_hata_ozeti(b"") == "çıktı yok")
+    s.tamam("git_hata_ozeti: son üç satır", git_hata_ozeti(b"a\nb\nc\nd\n\n") == "b | c | d")
+    s.tamam("git_hata_ozeti: 300 karakterle sınırlı", len(git_hata_ozeti(b"x" * 2000)) == 300)
+    s.tamam("git_hata_ozeti: URL parolası gizli", "parola1" not in git_hata_ozeti(b"fatal: https://u:parola1@h.example/x"))
+
+    asil_git = globals()["git"]
+    try:
+        globals()["git"] = lambda args, cwd=None, dosya_izni=False, girdi=None, zaman=900: (128, b"", b"fatal: https://u:parola1@h.example/x\n")
+        try:
+            git_ok(["status"])
+            mesaj = ""
+        except Kirmizi as e:
+            mesaj = str(e)
+    finally:
+        globals()["git"] = asil_git
+    s.tamam("git_ok: hata mesajında URL parolası gizli", "başarısız" in mesaj and "parola1" not in mesaj and "https://***@h.example/x" in mesaj)
+    kilit_k = {"name": "expat", "url": "https://github.com/arthenica/libexpat", "ref": "R_2_9_0", "commit": "a" * 40}
+    durum = {"basarisiz": "commit"}
+
+    def sahte_git(args, cwd=None, dosya_izni=False, girdi=None, zaman=900):
+        if args[0] == "fetch":
+            etiket_mi = any(a.startswith("+refs/tags/") for a in args)
+            if durum["basarisiz"] == "commit" and not etiket_mi:
+                return 128, b"", b"fatal: could not read from https://u:parola1@h.example/x\n"
+            if durum["basarisiz"] == "etiket" and etiket_mi:
+                return 128, b"", b"fatal: couldn't find remote ref refs/tags/R_2_9_0\n"
+            return 0, b"", b""
+        if args[0] == "rev-parse":
+            return 0, b"a" * 40 + b"\n", b""
+        return 0, b"", b""
+
+    mesajlar = {}
+    try:
+        globals()["git"] = sahte_git
+        for hangisi in ("commit", "etiket"):
+            durum["basarisiz"] = hangisi
+            try:
+                kaynak_cek(kilit_k, os.path.join(kok, "tani-kaynak-" + hangisi), False)
+                mesajlar[hangisi] = ""
+            except Kirmizi as e:
+                mesajlar[hangisi] = str(e)
+    finally:
+        globals()["git"] = asil_git
+    s.tamam("kaynak_cek: commit indirilemezse git stderr'i mesajda, parola gizli",
+            "indirilemedi" in mesajlar["commit"] and "(git: fatal: could not read from https://***@h.example/x)" in mesajlar["commit"] and "parola1" not in mesajlar["commit"])
+    s.tamam("kaynak_cek: etiket getirilemezse git stderr'i mesajda", "getirilemedi" in mesajlar["etiket"] and "(git: fatal: couldn't find remote ref" in mesajlar["etiket"])
+    try:
+        kaynak_cek({"name": "x", "url": "file://" + os.path.join(kok, "yok-depo").replace(os.sep, "/"), "ref": "r", "commit": "b" * 40},
+                   os.path.join(kok, "tani-kaynak-3"), True)
+        mesaj = ""
+    except Kirmizi as e:
+        mesaj = str(e)
+    s.tamam("kaynak_cek: gerçek git hatası mesaja girer (boş değil)", "(git: " in mesaj and "(git: çıktı yok)" not in mesaj)
+
+    # --- build.log kuyruğu ---
+    buyuk = os.path.join(kok, "buyuk.log")
+    with open(buyuk, "wb") as f:
+        for i in range(60000):
+            f.write(b"satir %06d dolgu dolgu dolgu\n" % i)
+        f.write(b"INFO: Skipping libass, dependencies built=0, already built=\nINFO: Skipping freetype, dependencies built=0, already built=\nSON\n")
+    sonu = log_sonu(buyuk, 1000)
+    s.tamam("log_sonu: bayt sınırını aşmaz, tam satırla başlar", len(sonu) <= 1000 and sonu.startswith("satir "))
+    s.tamam("log_sonu: son satır korunur", sonu.endswith("SON\n") and "satir 000000" not in sonu)
+    s.tamam("log_sonu: küçük dosya aynen", log_sonu(buyuk, 10 ** 9).startswith("satir 000000"))
+    s.tamam("bekleyen_kitapliklar: sıralı ve yinelenmez", bekleyen_kitapliklar("INFO: Skipping libass, dependencies built=0\nINFO: Skipping freetype, dependencies built=0\nINFO: Skipping libass, dependencies built=0\nINFO: Skipping lame, dependencies built=1\n") == ["freetype", "libass"])
+
+    # --- tanı toplama ---
+    cwork = os.path.join(kok, "tani-work")
+    _yaz(os.path.join(cwork, "build.log"), b"BASLA TOKEN_X=cok-gizli\n" + b"dolgu dolgu dolgu dolgu\n" * 400000 + b"INFO: Skipping freetype, dependencies built=0, already built=\nSON\n")
+    _yaz(os.path.join(cwork, "src", "expat", "expat", "config.log"), b"configure basladi\n")
+    _yaz(os.path.join(cwork, "src", "ffmpeg", "build", "meson-logs", "meson-log.txt"), b"eski satir\n" * 100000 + b"meson son\n")
+    _yaz(os.path.join(cwork, "src", "foo", "baska.txt"), b"alinmaz\n")
+    _yaz(os.path.join(cwork, "prebuilt", "arm64-apple-ios", "libpng", "x"), b"x")
+    _yaz(os.path.join(cwork, "prebuilt", "arm64-apple-ios", "expat", "x"), b"x")
+    if os.name == "posix":
+        os.symlink(os.path.join(cwork, "build.log"), os.path.join(cwork, "src", "foo", "config.log"))
+    cout = os.path.join(kok, "tani-out")
+    s.tamam("tani_topla: çıkış kodu 0", tani_topla(cwork, cout) == 0)
+    s.tamam("tani_topla: yalnız beklenen dosyalar",
+            sorted(os.listdir(cout)) == sorted(["build.log", "indeks.txt", "prebuilt-liste.txt", "src__expat__expat__config.log", "src__ffmpeg__build__meson-logs__meson-log.txt"]))
+    with open(os.path.join(cout, "build.log"), "rb") as f:
+        log_cikti = f.read()
+    s.tamam("tani_topla: build.log sınırlı (baş+son), atlanan bayt yazılı", len(log_cikti) <= TANI_LOG_BAS + TANI_LOG_SON + 200 and b"bayt atland" in log_cikti)
+    s.tamam("tani_topla: baş ve son korunur", log_cikti.startswith(b"BASLA") and log_cikti.endswith(b"SON\n"))
+    s.tamam("tani_topla: gizli değer artifact'a girmez", b"cok-gizli" not in log_cikti and b"TOKEN_X=***" in log_cikti)
+    s.tamam("tani_topla: günlük dosyası sondan sınırlı", os.path.getsize(os.path.join(cout, "src__ffmpeg__build__meson-logs__meson-log.txt")) <= TANI_DOSYA_SON + 100)
+    with open(os.path.join(cout, "src__ffmpeg__build__meson-logs__meson-log.txt"), "rb") as f:
+        s.tamam("tani_topla: günlük dosyasının sonu korunur", f.read().endswith(b"meson son\n"))
+    with open(os.path.join(cout, "indeks.txt"), "rb") as f:
+        indeks = f.read().decode()
+    s.tamam("tani_topla: indeks bekleyen kütüphaneyi söyler", "bağımlılığı bekleyen kütüphaneler: freetype" in indeks)
+    with open(os.path.join(cout, "prebuilt-liste.txt"), "rb") as f:
+        s.tamam("tani_topla: prebuilt listesi", b"prebuilt/arm64-apple-ios/libpng" in f.read())
+    s.kirmizi_olmali("tani_topla: çıktı dizini varsa kırmızı", lambda: tani_topla(cwork, cout), "zaten var")
+    s.tamam("tani_topla: çalışma dizini yoksa 0 ve çıktı oluşmaz", tani_topla(os.path.join(kok, "yok-work"), os.path.join(kok, "yok-out")) == 0 and not os.path.exists(os.path.join(kok, "yok-out")))
+    if os.name == "posix":
+        bag_work = os.path.join(kok, "tani-bag-work")
+        _yaz(os.path.join(kok, "tani-bag-hedef"), b"gizli-icerik\n")
+        os.makedirs(bag_work)
+        os.symlink(os.path.join(kok, "tani-bag-hedef"), os.path.join(bag_work, "build.log"))
+        bag_out = os.path.join(kok, "tani-bag-out")
+        tani_topla(bag_work, bag_out)
+        s.tamam("tani_topla: build.log sembolik bağsa izlenmez", not os.path.exists(os.path.join(bag_out, "build.log")))
+    eski_toplam = globals()["TANI_TOPLAM"]
+    try:
+        globals()["TANI_TOPLAM"] = 1
+        sinir_out = os.path.join(kok, "tani-sinir")
+        tani_topla(cwork, sinir_out)
+    finally:
+        globals()["TANI_TOPLAM"] = eski_toplam
+    with open(os.path.join(sinir_out, "indeks.txt"), "rb") as f:
+        s.tamam("tani_topla: toplam sınırı aşılınca günlük dosyaları alınmaz ve indekste yazar",
+                b"toplam s" in f.read() and not os.path.exists(os.path.join(sinir_out, "src__expat__expat__config.log")))
+
+    # --- iş akışı (build.yml) ---
+    yol = os.path.join(HERE, ".github", "workflows", "build.yml")
+    if not os.path.isfile(yol):
+        return
+    with open(yol, "rb") as f:
+        yml = f.read().decode("utf-8")
+    kullanimlar = re.findall(r"(?m)^\s*(?:- )?uses: (\S+)", yml)
+    s.tamam("build.yml: her uses tam commit SHA'sına sabit", len(kullanimlar) >= 4 and all(re.fullmatch(r"[A-Za-z0-9_./-]+@[0-9a-f]{40}", u) for u in kullanimlar))
+    kod_satirlari = "\n".join(l for l in yml.split("\n") if not l.strip().startswith("#"))
+    s.tamam("build.yml: secrets ve cache yok", "secrets." not in kod_satirlari and "actions/cache" not in kod_satirlari)
+    try:
+        topla = _yml_adim_blogu(yml, "Tanı kayıtlarını topla")
+        yukle = _yml_adim_blogu(yml, "Tanı kayıtlarını yükle")
+        asil_yukle = _yml_adim_blogu(yml, "Çıktıları yükle")
+        derle_adimi = _yml_adim_blogu(yml, "Derle")
+    except Kirmizi as e:
+        s.tamam("build.yml tanı adımları bulunur: %s" % e, False)
+        return
+    kosul = "if: failure() || cancelled()"
+    s.tamam("build.yml: tanı topla adımı başarısızlıkta ve iptalde koşar", kosul in topla and "build.py tani" in topla)
+    s.tamam("build.yml: tanı yükle adımı başarısızlıkta ve iptalde koşar", kosul in yukle)
+    s.tamam("build.yml: tanı adımları Derle'den sonra", yml.index("- name: Tanı kayıtlarını topla") > yml.index("- name: Derle") and yml.index("- name: Tanı kayıtlarını yükle") > yml.index("- name: Tanı kayıtlarını topla"))
+    s.tamam("build.yml: tanı yükleme mevcut upload-artifact SHA'sını kullanır",
+            re.search(r"uses: (\S+)", yukle).group(1) == re.search(r"uses: (\S+)", asil_yukle).group(1))
+    s.tamam("build.yml: tanı artifact'ı kısa saklamalı, dosya yoksa sessiz", "retention-days: 3" in yukle and "if-no-files-found: ignore" in yukle)
+    s.tamam("build.yml: tanı artifact'ı koşuya özel ad ve yalnız tani dizini", "format('tani-{0}', github.run_id)" in yukle and "runner.temp }}/tani/" in yukle)
+    s.tamam("build.yml: Derle adımı çıktıyı tamponlamaz (PYTHONUNBUFFERED)", "PYTHONUNBUFFERED: '1'" in derle_adimi)
+    s.tamam("build.yml: tani build.py'nin gerçek bir alt komutu", ayristirici().parse_args(["tani", "--work", "w", "--out", "o"]).komut == "tani")
+    if os.name == "posix" and shutil.which("bash") and shutil.which("python3"):
+        gorev = os.path.join(kok, "yml-tani")
+        os.makedirs(gorev)
+        shutil.copy(os.path.join(HERE, "build.py"), os.path.join(gorev, "build.py"))
+        _yaz(os.path.join(gorev, "tmp", "work", "build.log"), b"BASLA\nINFO: Skipping libass, dependencies built=0\n")
+        betik = re.search(r"(?m)^        run: (.+)$", topla).group(1)
+        p = subprocess.run(["bash", "-e", "-o", "pipefail", "-c", betik], cwd=gorev, env=dict(os.environ, RUNNER_TEMP=os.path.join(gorev, "tmp")),
+                           stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=120)
+        s.tamam("build.yml: tanı topla adımı gerçek bash'te çalışır ve tani dizinini üretir",
+                p.returncode == 0 and os.path.isfile(os.path.join(gorev, "tmp", "tani", "build.log")))
+
+
+def _selftest_bekci(s, kok):
+    """zamanli_calistir ve derle bekçisi (yalnız POSIX: süreç grubu, sh)."""
+    if os.name != "posix":
+        return
+
+    def kos(betik, sinir, kontrol=0.1):
+        cikti = io.BytesIO()
+        t = time.time()
+        rc, asildi, son = zamanli_calistir(["sh", "-c", betik], kok, dict(os.environ), sinir, kontrol, cikti)
+        return rc, asildi, son, cikti.getvalue(), time.time() - t
+
+    rc, asildi, son, cikti, _ = kos("printf a; sleep 0.3; printf b", 5)
+    s.tamam("bekçi: normal süreç çıkış kodu 0, çıktı aynen aktarılır", rc == 0 and not asildi and cikti == b"ab" and son == b"ab")
+    rc, asildi, _, _, _ = kos("exit 3", 5)
+    s.tamam("bekçi: çıkış kodu aktarılır, zaman aşımı değil", rc == 3 and not asildi)
+    rc, asildi, _, cikti, sure = kos("echo basla; sleep 60", 1.0)
+    s.tamam("bekçi: sessiz süreç öldürülür ve bildirilir", asildi and rc != 0 and cikti == b"basla\n" and sure < 20)
+    rc, asildi, _, cikti, _ = kos("printf x; sleep 0.7; printf y; sleep 0.7; printf z", 1.2)
+    s.tamam("bekçi: her çıktı (satır sonsuz da) sayacı sıfırlar", rc == 0 and not asildi and cikti == b"xyz")
+    pid_dosyasi = os.path.join(kok, "bekci-pid")
+    rc, asildi, _, _, sure = kos('trap "" TERM; sleep 120 & echo $! > %s; echo basla; wait' % pid_dosyasi, 1.0)
+    try:
+        with open(pid_dosyasi) as f:
+            torun = int(f.read().strip())
+    except (OSError, ValueError):
+        torun = 0
+    olu = False
+    for _ in range(50):
+        try:
+            os.kill(torun, 0)
+        except OSError:
+            olu = True
+            break
+        time.sleep(0.1)
+    s.tamam("bekçi: SIGTERM'i yutan torun da öldürülür (süreç grubu)", asildi and torun > 1 and olu)
+    s.tamam("bekçi: SIGTERM'i yutan süreç beklemeden SIGKILL ile sonlandırılır", sure < 30)
+
+    work = os.path.join(kok, "bekci-work")
+    env = {"PATH": os.environ["PATH"]}
+
+    def derle_sina(betik, sinir=1.0):
+        if os.path.isdir(work):
+            _sil(work)
+        _yaz(os.path.join(work, "ios.sh"), betik.encode())
+        hata = io.StringIO()
+        mesaj, sonuc = "", None
+        with contextlib.redirect_stderr(hata):
+            try:
+                sonuc = derle(work, env, ["/bin/sh", "ios.sh"], sinir, lambda k, c, e, sn: zamanli_calistir(k, c, e, sn, 0.1, io.BytesIO()))
+            except Kirmizi as e:
+                mesaj = str(e)
+        return mesaj, hata.getvalue(), sonuc
+
+    mesaj, hata, _ = derle_sina('printf "lame: ok\\n"\necho "INFO: Skipping libass, dependencies built=0, already built=" >> build.log\n'
+                                'echo "INFO: Skipping freetype, dependencies built=0, already built=" >> build.log\nsleep 60\n')
+    s.tamam("derle: takılan ios.sh kırmızı, son çıktı ve bekleyen kütüphaneler mesajda",
+            "hiç çıktı vermedi" in mesaj and "lame: ok" in mesaj and "freetype, libass" in mesaj and "Skipping freetype" in hata)
+    mesaj, hata, _ = derle_sina('yes satir | head -n 800000 > build.log\necho GITHUB_TOKEN=cok-gizli >> build.log\necho SON_SATIR >> build.log\nexit 1\n')
+    s.tamam("derle: başarısız ios.sh kırmızı; build.log'un yalnız sonu yazdırılır", mesaj == "ios.sh başarısız (kod 1)" and "SON_SATIR" in hata and len(hata) < 4000 * 20)
+    s.tamam("derle: yazdırılan build.log sonunda gizli değer maskelenir", "cok-gizli" not in hata and "GITHUB_TOKEN=***" in hata)
+    s.tamam("derle: varsayılan sessizlik sınırı SESSIZLIK_SINIRI ve en çok bir saat", derle.__defaults__[2] == SESSIZLIK_SINIRI and 0 < SESSIZLIK_SINIRI <= 3600)
+    mesaj, hata, _ = derle_sina('trap "exit 0" TERM\necho basla\nsleep 60 &\nwait\n')
+    s.tamam("derle: SIGTERM'e 0 ile çıkan takılı süreç de kırmızı sayılır", "hiç çıktı vermedi" in mesaj)
+    mesaj, hata, sonuc = derle_sina('mkdir -p prebuilt/bundle-apple-xcframework-x\n')
+    s.tamam("derle: başarılı ios.sh çıktı dizinini döndürür", mesaj == "" and sonuc is not None and sonuc.endswith("bundle-apple-xcframework-x"))
 
 
 if __name__ == "__main__":

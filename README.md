@@ -235,6 +235,20 @@ without network access. What stops or detects this:
 Not covered: a download that leaves none of these traces (for example a file fetched into a temporary directory or into
 a path that already exists in the tree).
 
+### Failed or cancelled runs
+
+- `build.py build` kills the whole Next process group if `ios.sh` prints nothing for 40 minutes (`SESSIZLIK_SINIRI`) and
+  fails with the last output and the libraries that `build.log` shows as waiting for a dependency. Next prints
+  `<library>: ` when a library starts and `ok` when it ends, so silence means that no library (or the scheduler
+  between libraries) makes progress.
+- A failed `git fetch` of a locked commit or tag reports the last lines of git's own error message, with URL
+  credentials and token-shaped strings masked.
+- When the `build` job fails or is cancelled, `python3 build.py tani` collects the head and tail of `build.log` (sizes
+  capped, the same masking applied), the `config.log`, `meson-log.txt` and CMake logs under `src/`, and a listing of
+  `prebuilt/`. The workflow uploads them as the artifact `tani-<run id>` with a 3-day retention; they are never part of
+  a release. The build runs in an allow-listed environment, so the logs are not expected to contain secrets; the masking
+  is a second line of defence, not a guarantee.
+
 ## License
 
 `LGPL-3.0-or-later`, see [LICENSE](LICENSE). The LGPL version 3 is written as additional permissions on top of the GNU

@@ -10,6 +10,7 @@
 
 Aşamalar (all hepsini bu sırayla koşar): tools, fetch, verify-lock (önce), archive, patch, build,
 verify-lock (sonra), check, package. Ayrı ayrı da koşulabilirler; `--help` ile her birinin girdisi görülür.
+`tani --work <dizin> --out <yeni dizin>` aşama zincirinde değildir: başarısız ya da iptal koşunun günlüklerini sınırlı ve gizlenmiş toplar.
 """
 import argparse
 import ast
@@ -783,6 +784,80 @@ def cikti_dizini_bul(work):
     return os.path.join(pb, adaylar[0])
 
 
+# MARK: - Tanı
+
+# Başarısız ya da iptal olan koşunun günlükleri (iş akışındaki tani adımı). Next tek bir work/build.log yazar (kütüphane başına günlük
+# yoktur); kütüphane başına olan tek şey autoconf/meson/cmake'in kendi günlükleridir. Hepsi boyut sınırlıdır: bekleme döngüsünde
+# build.log gigabaytlara çıkabilir ve artifact'a bütünüyle girmez.
+TANI_LOG_BAS = 512 * 1024
+TANI_LOG_SON = 2 * 1024 * 1024
+TANI_DOSYA_SON = 256 * 1024
+TANI_TOPLAM = 24 * 1024 * 1024
+TANI_DOSYA_ADLARI = frozenset(["config.log", "meson-log.txt", "CMakeError.log", "CMakeOutput.log"])
+
+
+def _bas_son(yol, bas, son):
+    """Küçükse bütünü; değilse ilk `bas` ve son `son` bayt, arada kaç baytın atlandığı yazılı."""
+    boyut = os.path.getsize(yol)
+    with open(yol, "rb") as f:
+        if boyut <= bas + son:
+            return f.read(), boyut
+        ilk = f.read(bas)
+        f.seek(boyut - son)
+        return ilk + ("\n[... %d bayt atlandı ...]\n" % (boyut - bas - son)).encode("utf-8") + f.read(son), boyut
+
+
+def _tani_yaz(hedef, veri):
+    with open(hedef, "wb") as f:
+        f.write(gizle(veri.decode("utf-8", "replace")).encode("utf-8"))
+
+
+def tani_topla(work, out):
+    """work'teki build.log (baş+son), kütüphane günlükleri ve prebuilt dizin listesi out'a (yeni dizin) gizlenerek ve sınırlı kopyalanır."""
+    if not os.path.isdir(work):
+        print("tani: çalışma dizini yok, toplanacak bir şey yok")
+        return 0
+    kirmizi_if(os.path.lexists(out), "tanı çıktı dizini zaten var")
+    os.makedirs(out)
+    indeks, toplam = [], 0
+    log = os.path.join(work, "build.log")
+    if os.path.isfile(log) and not os.path.islink(log):
+        veri, boyut = _bas_son(log, TANI_LOG_BAS, TANI_LOG_SON)
+        _tani_yaz(os.path.join(out, "build.log"), veri)
+        toplam += len(veri)
+        indeks.append("build.log: kaynak %d bayt, yazılan %d bayt" % (boyut, len(veri)))
+        bekleyen = bekleyen_kitapliklar(log_sonu(log))
+        indeks.append("build.log sonunda bağımlılığı bekleyen kütüphaneler: %s" % (", ".join(bekleyen) or "yok"))
+    else:
+        indeks.append("build.log yok")
+    kaynak = os.path.join(work, "src")
+    if os.path.isdir(kaynak):
+        for kok, dizinler, dosyalar in os.walk(kaynak, followlinks=False):
+            dizinler.sort()
+            for ad in sorted(dosyalar):
+                yol = os.path.join(kok, ad)
+                if ad not in TANI_DOSYA_ADLARI or os.path.islink(yol) or not os.path.isfile(yol):
+                    continue
+                goreli = os.path.relpath(yol, work).replace(os.sep, "__")
+                if toplam >= TANI_TOPLAM:
+                    indeks.append("%s: toplam sınırı aşıldı, alınmadı" % goreli)
+                    continue
+                veri, boyut = _bas_son(yol, 0, TANI_DOSYA_SON)
+                _tani_yaz(os.path.join(out, goreli), veri)
+                toplam += len(veri)
+                indeks.append("%s: kaynak %d bayt, yazılan %d bayt" % (goreli, boyut, len(veri)))
+    prebuilt = os.path.join(work, "prebuilt")
+    satirlar = []
+    if os.path.isdir(prebuilt):
+        for d in sorted(os.listdir(prebuilt)):
+            if os.path.isdir(os.path.join(prebuilt, d)) and not os.path.islink(os.path.join(prebuilt, d)):
+                satirlar += ["prebuilt/%s/%s" % (d, e) for e in sorted(os.listdir(os.path.join(prebuilt, d)))]
+    _tani_yaz(os.path.join(out, "prebuilt-liste.txt"), ("\n".join(satirlar) + "\n").encode("utf-8"))
+    _tani_yaz(os.path.join(out, "indeks.txt"), ("\n".join(indeks) + "\n").encode("utf-8"))
+    print("tani: %d dosya, %d bayt yazıldı: %s" % (len(indeks), toplam, out))
+    return 0
+
+
 # MARK: - check
 
 RE_KOSU = re.compile(rb"[\x20-\x7e]{16,65536}")
@@ -1338,6 +1413,10 @@ def asama_build(a):
     return 0
 
 
+def asama_tani(a):
+    return tani_topla(a.work, a.out)
+
+
 def asama_check(a):
     check_tam(a.work, cikti_dizini_bul(a.work))
     return 0
@@ -1391,6 +1470,7 @@ def ayristirici():
     ekle("archive", asama_archive, work=True, out=True, label=True)
     ekle("patch", asama_patch, work=True, lock=False)
     ekle("build", asama_build, work=True, lock=False)
+    ekle("tani", asama_tani, work=True, out=True, lock=False)
     ekle("check", asama_check, work=True, lock=False)
     ekle("package", asama_package, work=True, out=True, label=True)
     ekle("lock-durum", asama_lock_durum)

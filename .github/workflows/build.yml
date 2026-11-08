@@ -68,6 +68,8 @@ jobs:
           REF_TYPE: ${{ github.ref_type }}
           REF_NAME: ${{ github.ref_name }}
           COMMIT_SHA: ${{ github.sha }}
+          # Python çıktısı tamponlanmaz: takılan bir koşuda son ilerleme satırı günlükte görünür.
+          PYTHONUNBUFFERED: '1'
         run: |
           if [ "$REF_TYPE" = "tag" ]; then
             etiket="$REF_NAME"
@@ -89,6 +91,18 @@ jobs:
           path: ${{ runner.temp }}/dist/
           if-no-files-found: error
           retention-days: ${{ github.event_name == 'workflow_dispatch' && 3 || 7 }}
+      - name: Tanı kayıtlarını topla
+        # Başarısız ya da iptal koşuda build.log (baş ve son, boyut sınırlı, gizlenmiş) ve kütüphane günlükleri; sürüm çıktısına girmez.
+        if: failure() || cancelled()
+        run: python3 build.py tani --work "$RUNNER_TEMP/work" --out "$RUNNER_TEMP/tani"
+      - name: Tanı kayıtlarını yükle
+        if: failure() || cancelled()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: ${{ format('tani-{0}', github.run_id) }}
+          path: ${{ runner.temp }}/tani/
+          if-no-files-found: ignore
+          retention-days: 3
 
   release:
     name: release

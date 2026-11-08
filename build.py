@@ -20,6 +20,7 @@ import io
 import json
 import os
 import re
+import shlex
 import shutil
 import signal
 import stat
@@ -866,13 +867,50 @@ RE_LISANS = re.compile(rb"libavutil license: ([\x20-\x7e]{1,100})(?:\x00|\Z)")
 CONFIG_CAPA = b"--target-os="
 
 
+RE_TIRNAKSIZ = re.compile(r"[A-Za-z0-9_/.+-]*")   # configure sh_quote'un tırnaklamadığı küme
+
+
+def belirtec_tirnakla(t):
+    """FFmpeg configure'ın bir argümanı FFMPEG_CONFIGURATION'a katma biçimi (configure@946fcce :4555-4560 ve sh_quote :615-619):
+    ilk '=' e kadarki kısım olduğu gibi, değer kısmı tek tırnak '\\'' ile kaçırılıp küme dışı karakter varsa tek tırnağa alınır."""
+    if "=" in t:
+        ad, deger = t.split("=", 1)
+        ad += "="
+    else:
+        ad, deger = "", t
+    deger = deger.replace("'", "'\\''")
+    if RE_TIRNAKSIZ.fullmatch(deger) is None:
+        deger = "'" + deger + "'"
+    return ad + deger
+
+
+def belirtec_ayir(ham):
+    """Ham configure dizesini belirteçlere ayırır. Ayırma tırnak kurallarıyla yapılır (virgüllü ya da boşluklu değer tek tırnaklıdır) ve
+    belirteçlerin yeniden tırnaklanıp boşlukla birleşimi ham dizeye bayt bayt eşit olmalıdır: tırnaksız/çift tırnaklı/çift boşluklu
+    biçim FFmpeg'in yazabileceği biçim değildir ve sessizce kabul edilmez."""
+    lex = shlex.shlex(ham, posix=True)
+    lex.commenters = ""          # varsayılan '#' yorum karakteri bir değerde '#'ten sonrasını sessizce düşürürdü
+    lex.whitespace_split = True
+    try:
+        belirtecler = list(lex)
+    except ValueError as e:
+        raise Kirmizi("configure dizesi ayrıştırılamadı (kapanmamış tırnak ya da kaçış): %s" % gizle(str(e)))
+    yeniden = " ".join(belirtec_tirnakla(t) for t in belirtecler)
+    if yeniden != ham:
+        i = next((n for n, (a, b) in enumerate(zip(yeniden, ham)) if a != b), min(len(yeniden), len(ham)))
+        baslangic = max(0, i - 8)
+        raise Kirmizi("configure dizesi FFmpeg'in tırnaklama biçiminde değil (ilk fark %d. bayt: %s)" % (i, gizle(ham[baslangic:baslangic + 40])))
+    return belirtecler
+
+
 def yapilandirma_dizeleri(veri):
-    """libavutil baytlarında --target-os= çapalı configure dizeleri (sıralı belirteç listeleri) ve lisans dizeleri."""
+    """libavutil baytlarında --target-os= çapalı configure dizeleri ((ham dize, belirteç listesi) çiftleri) ve lisans dizeleri."""
     dizeler = []
     for m in RE_KOSU.finditer(veri):
         s = m.group(0)
         if CONFIG_CAPA in s:
-            dizeler.append([t.decode("ascii") for t in s.split(b" ") if t])
+            ham = s.decode("ascii")
+            dizeler.append((ham, belirtec_ayir(ham)))
     lisanslar = sorted(set(m.group(1).decode("ascii") for m in RE_LISANS.finditer(veri)))
     return dizeler, lisanslar
 
@@ -1079,13 +1117,18 @@ def check(xc, ffmpeg_agaci, otool_calistir=subprocess.run):
         if not os.path.isfile(yol):
             continue
         with open(yol, "rb") as f:
-            dizeler, lisanslar = yapilandirma_dizeleri(f.read())
+            veri = f.read()
+        try:
+            dizeler, lisanslar = yapilandirma_dizeleri(veri)
+        except Kirmizi as e:
+            sorunlar.append("libavutil/%s: %s" % (d, e))
+            continue
         if not dizeler:
             sorunlar.append("libavutil/%s: configure dizesi bulunamadı" % d)
-        for dz in dizeler:
+        for ham, dz in dizeler:
             for s in configure_denetle(dz, lisanslar):
                 sorunlar.append("libavutil/%s: %s" % (d, s))
-            satirlar.append((d, " ".join(dz)))
+            satirlar.append((d, ham))
         if not dizeler and (len(lisanslar) != 1 or not lisanslar[0].startswith("LGPL")):
             sorunlar.append("libavutil/%s: license dizesi tek ve LGPL ile başlayan değil" % d)
     kume = set()
@@ -1625,8 +1668,31 @@ def _configure(ekstra=(), cikar=()):
     return parcalar
 
 
+# FFmpeg configure'ın FFMPEG_CONFIGURATION'a yazdığı gerçek biçim, elle yazılmış (build.py'nin tırnaklama işleviyle üretilmez; yoksa sınama
+# kendini doğrulardı). Virgüllü değer, boşluklu değer ve değerin içindeki tek tırnak ('\'' dizisi) configure@946fcce sh_quote çıktısıdır.
+GERCEK_TEMEL_HAM = ("--prefix=/x --enable-version3 --arch=arm64 --target-os=darwin --enable-cross-compile --enable-videotoolbox "
+                    "--enable-libvpx --enable-libopus --enable-libass --enable-libfontconfig --enable-libfreetype --enable-libfribidi "
+                    "--enable-libharfbuzz --enable-libmp3lame --enable-zlib "
+                    "--disable-network --disable-protocols --enable-protocol=file --disable-demuxer='hls,dash,concat,image2' --disable-muxer=tee")
+GERCEK_HAM = ("--prefix=/x --enable-version3 --arch=arm64 --target-os=darwin --enable-cross-compile --enable-videotoolbox "
+              "--enable-libvpx --enable-libopus --enable-libass --enable-libfontconfig --enable-libfreetype --enable-libfribidi "
+              "--enable-libharfbuzz --enable-libmp3lame --enable-zlib --extra-cflags='-O2 -DX' --extra-cxxflags='-DNAME='\\''x'\\''' "
+              "--disable-network --disable-protocols --enable-protocol=file --disable-demuxer='hls,dash,concat,image2' --disable-muxer=tee")
+
+
+def _ham(belirtecler):
+    """Belirteç listesinden ham dize: yalnız virgüllü ya da boşluklu değerler tek tırnaklanır (selftest girdileri bunlarla sınırlı)."""
+    parcalar = []
+    for t in belirtecler:
+        ad, esit, deger = t.partition("=")
+        parcalar.append(ad + esit + "'" + deger + "'" if esit and ("," in deger or " " in deger) else t)
+    return " ".join(parcalar)
+
+
 def _sahte_ikili(belirtecler, lisans=b"LGPL version 3 or later"):
-    ic = b"\x00\x01libavutil license: " + lisans + b"\x00\x02" + " ".join(belirtecler).encode() + b"\x00\x03"
+    """belirtecler: belirteç listesi ya da ham dize (str)."""
+    ham = belirtecler if isinstance(belirtecler, str) else _ham(belirtecler)
+    ic = b"\x00\x01libavutil license: " + lisans + b"\x00\x02" + ham.encode() + b"\x00\x03"
     return b"\xcf\xfa\xed\xfe" + ic
 
 
@@ -2323,6 +2389,38 @@ def _selftest_icerik(s, kok):
     satirlar, kume = check(xc0, ff, ot)
     s.tamam("check olumlu: iki dilim configure satırı ve küme", len(satirlar) == 2 and ("protocol", "file") in kume and ("demuxer", "mov") in kume and ("decoder", "h264") in kume)
 
+    # --- configure dizesi: FFmpeg'in gerçek tırnaklama biçimi (SK-943-1) ---
+    s.tamam("fixture: _ham(_configure()) elle yazılmış gerçek biçimin aynısı", _ham(_configure()) == GERCEK_TEMEL_HAM and "'hls,dash,concat,image2'" in GERCEK_TEMEL_HAM)
+    s.tamam("check olumlu: satırlar ikilideki ham dizedir (belirteçlerin yeniden birleşimi değil)", satirlar == [(d, GERCEK_TEMEL_HAM) for d in DILIMLER])
+    gdizeler, _ = yapilandirma_dizeleri(_sahte_ikili(GERCEK_HAM))
+    gtok = gdizeler[0][1] if len(gdizeler) == 1 else []
+    s.tamam("yapilandirma_dizeleri: ham dize ve tırnak kurallarıyla ayrılmış belirteçler (virgüllü, boşluklu, içinde tek tırnaklı değer)",
+            len(gdizeler) == 1 and gdizeler[0][0] == GERCEK_HAM and "--disable-demuxer=hls,dash,concat,image2" in gtok
+            and "--extra-cflags=-O2 -DX" in gtok and "--extra-cxxflags=-DNAME='x'" in gtok and "--disable-muxer=tee" in gtok and "--enable-zlib" in gtok)
+    xcz = _sahte_xc(os.path.join(kok, "c0z"), GERCEK_HAM)
+    zsatirlar, _ = check(xcz, _sahte_kume(os.path.join(kok, "c0z")), ot)
+    s.tamam("check olumlu: elle yazılmış gerçek biçim (virgüllü, boşluklu, tek tırnaklı değerler) geçer, satır ham", zsatirlar == [(d, GERCEK_HAM) for d in DILIMLER])
+    for ad_, girdi_, beklenen_ in (("değer tırnaklanır", "--a=b c", "--a='b c'"), ("boş değer tırnaksız", "--a=", "--a="), ("= yok, güvenli", "plain", "plain"),
+                                   ("değerde tek tırnak", "--a=it's", "--a='it'\\''s'"), ("= yok, boşluklu", "a b", "'a b'"),
+                                   ("ilk = ayırır, ikincisi değerde kalır", "--a=b=c", "--a='b=c'"), ("virgül", "--a=x,y", "--a='x,y'"),
+                                   ("küme içi karakterler tırnaksız", "--a=A-z_0/9.+-", "--a=A-z_0/9.+-"), ("ad kısmı tırnaklanmaz", "--a b=c", "--a b=c")):
+        s.tamam("belirtec_tirnakla: %s" % ad_, belirtec_tirnakla(girdi_) == beklenen_)
+    s.tamam("belirtec_ayir: tırnaklı '#' değerde yorum sayılmaz", belirtec_ayir("--x='a #b' --y") == ["--x=a #b", "--y"])
+    for ad_, ham_ in (("kapanmamış tek tırnak", "--a='b c --d"), ("sonda kaçış", "--a=b\\")):
+        s.kirmizi_olmali("belirtec_ayir: %s" % ad_, lambda: belirtec_ayir(ham_), "ayrıştırılamadı")
+    kirmizi_mesaj = ""
+    try:
+        belirtec_ayir("--a=b  --c=d")
+    except Kirmizi as e:
+        kirmizi_mesaj = str(e)
+    s.tamam("belirtec_ayir: çift boşlukta ilk farkın konumu ve kesit mesajda", "ilk fark 6. bayt" in kirmizi_mesaj and "--c=d" in kirmizi_mesaj)
+    uzun_mesaj = ""
+    try:
+        belirtec_ayir("--a=b " + "x" * 200 + "  y")
+    except Kirmizi as e:
+        uzun_mesaj = str(e)
+    s.tamam("belirtec_ayir: mesajdaki kesit en çok 40 bayt", "ilk fark" in uzun_mesaj and len(uzun_mesaj.split("bayt: ", 1)[1]) <= 41)
+
     sayac = [0]
 
     def check_dene(ad, parca, bayrak=None, lisans=b"LGPL version 3 or later", dilimler=DILIMLER, otool=None, kume_degistir=None, kume_atla=(), ekstra=None):
@@ -2348,6 +2446,18 @@ def _selftest_icerik(s, kok):
     for lib in HARICI_KITAPLIKLAR:
         check_dene("harici kütüphane eksik " + lib, lib, [t for t in _configure() if t != lib])
     check_dene("version3 yok", "--enable-version3", [t for t in _configure() if t != "--enable-version3"])
+    dem = "'hls,dash,concat,image2'"
+    check_dene("demuxer değeri eksik (hls,dash,concat)", "--disable-demuxer=hls,dash,concat,image2 yok", GERCEK_TEMEL_HAM.replace(dem, "'hls,dash,concat'"))
+    check_dene("demuxer değeri fazla (…,image2,mov)", "--disable-demuxer=hls,dash,concat,image2 yok", GERCEK_TEMEL_HAM.replace(dem, "'hls,dash,concat,image2,mov'"))
+    check_dene("kapanmamış tırnak", "ayrıştırılamadı", GERCEK_TEMEL_HAM.replace(dem, "'hls,dash,concat,image2"))
+    check_dene("bütün belirteç tırnaklı ('--disable-network')", "tırnaklama biçiminde değil", GERCEK_TEMEL_HAM.replace("--disable-network ", "'--disable-network' "))
+    check_dene("çift tırnaklı değer", "tırnaklama biçiminde değil", GERCEK_TEMEL_HAM.replace(dem, '"hls,dash,concat,image2"'))
+    check_dene("tırnaksız demuxer değeri (eski beklenti biçimi) kabul edilmez", "tırnaklama biçiminde değil", GERCEK_TEMEL_HAM.replace(dem, "hls,dash,concat,image2"))
+    check_dene("belirteçler arasında çift boşluk", "tırnaklama biçiminde değil", GERCEK_TEMEL_HAM.replace("--disable-protocols --enable", "--disable-protocols  --enable"))
+    check_dene("dizenin başında boşluk", "tırnaklama biçiminde değil", " " + GERCEK_TEMEL_HAM)
+    check_dene("dizenin sonunda boşluk", "tırnaklama biçiminde değil", GERCEK_TEMEL_HAM + " ")
+    check_dene("değerin içindeki tek tırnak çift tırnakla sarılı", "tırnaklama biçiminde değil", GERCEK_HAM.replace("'-DNAME='\\''x'\\'''", "\"-DNAME='x'\""))
+    check_dene("enable-protocol='file,data' (tırnaklı, ikinci)", "enable-protocol", GERCEK_TEMEL_HAM + " --enable-protocol='file,data'")
     check_dene("GPL lisans dizesi", "LGPL", lisans=b"GPL version 3 or later")
     check_dene("configure dizesi yok", "bulunamadı", ["yok"])
     check_dene("fazla dilim", "dilim", dilimler=DILIMLER + ("ios-x86_64-simulator",))

@@ -19,11 +19,14 @@ import json
 import os
 import re
 import shutil
+import signal
 import stat
 import subprocess
 import sys
 import tarfile
 import tempfile
+import threading
+import time
 import zipfile
 
 HERE = os.path.dirname(os.path.realpath(__file__))
@@ -67,6 +70,12 @@ IOS_SECENEKLERI = [
 BREW_YOL_FORMULLERI = ["gettext", "bison", "texinfo"]
 GEREKLI_ARACLAR = ["git", "otool", "make", "autoconf", "automake", "pkg-config", "cmake", "meson", "ninja", "nasm"]
 TEMEL_PATH = "/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin"
+# Derleme ilerleme bekçisi (zamanli_calistir): ios.sh bu kadar saniye hiç stdout vermezse öldürülür. Her kütüphane `ad: ` ile başlar ve
+# `ok` ile biter; ilk deneme koşusunda libpng/expat sonrası 3 sa 53 dk sessizlik oldu. Kütüphane başına süre ölçülmedi (kütüphaneler
+# ilk koşuda 15-40 sn sürdü; ffmpeg ve xcframework aşamalarının süresi bilinmiyor): çok kısaltılırsa sağlıklı koşuyu öldürebilir.
+SESSIZLIK_SINIRI = 40 * 60
+LOG_SONU_BAYT = 256 * 1024
+
 # Derleme ortamının izin listesi. PKG_CONFIG_PATH tanımsız kalır: Next main-ios.sh PKG_CONFIG_LIBDIR'i kendi kurulum dizinine bağlar ve
 # Homebrew'un .pc dosyalarının (brotli gibi kilitte olmayan kitaplıklar) görünmesi derlemeyi kilitten bağımsız kılar.
 ENV_IZINLI = frozenset(["PATH", "HOME", "TMPDIR", "LANG", "GIT_TERMINAL_PROMPT", "DEVELOPER_DIR", "ACLOCAL_PATH", "SED"])
@@ -674,19 +683,95 @@ def araclari_denetle():
     print("tools: Xcode %s (%s) ve %d araç tamam" % (XCODE_UYGULAMA, XCODE_BUILD, len(GEREKLI_ARACLAR)))
 
 
-def derle(work):
-    """Next ios.sh'ı temiz ortamla koşar; çıktı dizinini döndürür. Next build.log'u release'e girmez."""
-    env = derleme_env()
-    komut = ["/bin/bash", "ios.sh"] + IOS_SECENEKLERI
+def _grubu_oldur(p):
+    """Süreç grubuna önce SIGTERM, kısa beklemeden sonra koşulsuz SIGKILL (SIGTERM'i yutan torunlar için)."""
+    for sinyal in (signal.SIGTERM, signal.SIGKILL):
+        try:
+            os.killpg(p.pid, sinyal)
+        except OSError:
+            pass
+        if sinyal == signal.SIGTERM:
+            try:
+                p.wait(5)
+            except subprocess.TimeoutExpired:
+                pass
+
+
+def zamanli_calistir(komut, cwd, env, sessizlik_siniri, kontrol_araligi=1.0, cikti=None, saat=time.monotonic):
+    """Alt süreci kendi süreç grubunda koşar ve stdout'unu aynen aktarır. `sessizlik_siniri` saniye boyunca tek bayt bile
+    gelmezse grubun tamamı öldürülür. (çıkış kodu, süre aşıldı mı, son çıktının son baytları) döner. Yalnız POSIX.
+    Next kütüphaneleri `ad: ` yazıp `ok` ile bitirir ve ayrıntıyı build.log'a yazar: bağımlılık bekleme döngüsü gibi bir takılmada
+    stdout susar, bu yüzden sessizlik bir kütüphanenin (ya da kütüphaneler arası zamanlayıcının) ilerlemediğini gösterir."""
+    cikti = sys.stdout.buffer if cikti is None else cikti
+    p = subprocess.Popen(komut, cwd=cwd, env=env, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, start_new_session=True)
+    durum = {"son": saat(), "kuyruk": b""}
+
+    def oku():
+        while True:
+            parca = os.read(p.stdout.fileno(), 65536)
+            if not parca:
+                return
+            durum["son"] = saat()
+            durum["kuyruk"] = (durum["kuyruk"] + parca)[-400:]
+            try:
+                cikti.write(parca)
+                cikti.flush()
+            except (OSError, ValueError):
+                pass
+
+    okuyucu = threading.Thread(target=oku, daemon=True)
+    okuyucu.start()
+    asildi = False
+    while p.poll() is None:
+        if saat() - durum["son"] > sessizlik_siniri:
+            asildi = True
+            _grubu_oldur(p)
+            break
+        time.sleep(kontrol_araligi)
+    p.wait()
+    okuyucu.join(5)
+    return p.returncode, asildi, durum["kuyruk"]
+
+
+def log_sonu(yol, bayt=LOG_SONU_BAYT):
+    """Dosyanın son `bayt` baytı (yarım ilk satır atılır). build.log bekleme döngüsünde gigabaytlara çıkabilir: bütünü okunmaz."""
+    boyut = os.path.getsize(yol)
+    with open(yol, "rb") as f:
+        f.seek(max(0, boyut - bayt))
+        veri = f.read(bayt)
+    metin = veri.decode("utf-8", "replace")
+    if boyut > bayt and "\n" in metin:
+        metin = metin.split("\n", 1)[1]
+    return metin
+
+
+RE_BEKLEYEN = re.compile(r"INFO: Skipping ([A-Za-z0-9_.+-]+), dependencies built=0")
+
+
+def bekleyen_kitapliklar(metin):
+    """build.log sonunda 'bağımlılığı hazır değil' diye atlanan kütüphaneler (sıralı, yinelenmez)."""
+    return sorted(set(RE_BEKLEYEN.findall(metin)))
+
+
+def derle(work, env=None, komut=None, sessizlik_siniri=SESSIZLIK_SINIRI, calistir=zamanli_calistir):
+    """Next ios.sh'ı temiz ortamla koşar; çıktı dizinini döndürür. Next build.log'u release'e girmez.
+    ios.sh `sessizlik_siniri` saniye hiç çıktı vermezse süreç grubu öldürülür ve kırmızı olur (tarihçe: ilk deneme koşusu 4 saat takıldı)."""
+    env = derleme_env() if env is None else env
+    komut = ["/bin/bash", "ios.sh"] + IOS_SECENEKLERI if komut is None else komut
     print("build: %s" % " ".join(komut))
     sys.stdout.flush()
-    rc = subprocess.call(komut, cwd=work, env=env)
-    if rc != 0:
+    rc, asildi, son = calistir(komut, work, env, sessizlik_siniri)
+    if rc != 0 or asildi:
         log = os.path.join(work, "build.log")
+        bekleyen = []
         if os.path.isfile(log):
-            with open(log, "rb") as f:
-                son = f.read().decode("utf-8", "replace").splitlines()[-150:]
-            print("\n".join(son), file=sys.stderr)
+            sonu = log_sonu(log)
+            bekleyen = bekleyen_kitapliklar(sonu)
+            print("build.log: %d bayt; son 150 satır:" % os.path.getsize(log), file=sys.stderr)
+            print(gizle("\n".join(sonu.splitlines()[-150:])), file=sys.stderr)
+        if asildi:
+            raise Kirmizi("ios.sh %d sn hiç çıktı vermedi, süreç grubu öldürüldü; son çıktı: %r; build.log sonunda bağımlılığı bekleyen kütüphaneler: %s"
+                          % (sessizlik_siniri, son.decode("utf-8", "replace")[-80:], ", ".join(bekleyen) or "yok"))
         raise Kirmizi("ios.sh başarısız (kod %d)" % rc)
     return cikti_dizini_bul(work)
 

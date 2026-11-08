@@ -2488,10 +2488,16 @@ def _selftest_icerik(s, kok):
     s.tamam("belirtec_ayir: çift boşlukta ilk farkın konumu ve kesit mesajda", "ilk fark 6. bayt" in kirmizi_mesaj and "--c=d" in kirmizi_mesaj)
     uzun_mesaj = ""
     try:
-        belirtec_ayir("--a=b " + "x" * 200 + "  y")
+        belirtec_ayir("--a=b  " + "y" * 200)
     except Kirmizi as e:
         uzun_mesaj = str(e)
-    s.tamam("belirtec_ayir: mesajdaki kesit en çok 40 bayt", "ilk fark" in uzun_mesaj and len(uzun_mesaj.split("bayt: ", 1)[1]) <= 41)
+    s.tamam("belirtec_ayir: mesajdaki kesit en çok 40 bayt", "ilk fark" in uzun_mesaj and 0 < len(uzun_mesaj.split("bayt: ", 1)[1].rstrip(")")) <= 40)
+    gizli_mesaj = ""
+    try:
+        belirtec_ayir("--a=b  API_TOKEN=cok-gizli")
+    except Kirmizi as e:
+        gizli_mesaj = str(e)
+    s.tamam("belirtec_ayir: mesajdaki kesit gizlenir", "ilk fark" in gizli_mesaj and "cok-gizli" not in gizli_mesaj and "API_TOKEN=***" in gizli_mesaj)
 
     sayac = [0]
 
@@ -2567,11 +2573,13 @@ def _selftest_icerik(s, kok):
         icerik_ = _liste_dosyasi(dosya_, KUME_ORNEK[dosya_])
         check_dene("küme: yanlış yapı adı (%s)" % dosya_, "başlık", kume_degistir={dosya_: _liste_dosyasi(dosya_, KUME_ORNEK[dosya_], yapi="AVCodecParser")})
         check_dene("küme: CRLF (%s)" % dosya_, "başlık", kume_degistir={dosya_: icerik_.replace("\n", "\r\n")})
-        check_dene("küme: NULL sonlandırıcısı yok (%s)" % dosya_, "başlık" if KUME_ORNEK[dosya_] == [] else "NULL", kume_degistir={dosya_: icerik_[:-len("    NULL };\n")]})
-        check_dene("küme: son satır sonu yok (%s)" % dosya_, "başlık" if KUME_ORNEK[dosya_] == [] else "NULL", kume_degistir={dosya_: icerik_[:-1]})
+        check_dene("küme: NULL sonlandırıcısı yok (%s)" % dosya_, "başlık" if KUME_ORNEK[dosya_] == [] else "sonlandırıcısı", kume_degistir={dosya_: icerik_[:-len("    NULL };\n")]})
+        check_dene("küme: son satır sonu yok (%s)" % dosya_, "başlık" if KUME_ORNEK[dosya_] == [] else "sonlandırıcısı", kume_degistir={dosya_: icerik_[:-1]})
         check_dene("küme: fazladan satır (%s)" % dosya_, "beklenmeyen satır", kume_degistir={dosya_: icerik_[:-len("    NULL };\n")] + "    // not\n    NULL };\n"})
         check_dene("küme: ikinci NULL (%s)" % dosya_, "beklenmeyen satır", kume_degistir={dosya_: icerik_ + "    NULL };\n"})
-        check_dene("küme: sonlandırıcıdan sonra çöp (%s)" % dosya_, "NULL", kume_degistir={dosya_: icerik_ + "x\n"})
+        check_dene("küme: sonlandırıcıdan sonra çöp (%s)" % dosya_, "sonlandırıcısı", kume_degistir={dosya_: icerik_ + "x\n"})
+        check_dene("küme: sonlandırıcı yerine 12 bayt çöp (%s)" % dosya_, "sonlandırıcısı",
+                   kume_degistir={dosya_: icerik_[:-len("    NULL };\n")] + "    NULL };\r"})
         check_dene("küme: boş dosya (%s)" % dosya_, "başlık", kume_degistir={dosya_: ""})
         check_dene("küme: yalnız başlık (%s)" % dosya_, "başlık", kume_degistir={dosya_: icerik_.split("\n")[0] + "\n"})
     check_dene("küme: girintisiz girdi", "beklenmeyen satır", kume_degistir={"libavformat/muxer_list.c": _liste_dosyasi("libavformat/muxer_list.c", []).replace("    NULL", "&ff_mp4_muxer,\n    NULL")})

@@ -2249,6 +2249,10 @@ def _selftest_icerik(s, kok):
     s.tamam("main-ios.sh yaması: fontconfig ve gnutls kolları bayt bayt aynı, fontconfig ve harfbuzz hâlâ OK_freetype bekler",
             kol_(mi, "fontconfig") == kol_(NEXT_MAIN_IOS_SH, "fontconfig") and kol_(mi, "gnutls") == kol_(NEXT_MAIN_IOS_SH, "gnutls")
             and "[[ $OK_freetype -eq 1 ]]" in kol_(mi, "fontconfig") and "[[ $OK_freetype -eq 1 ]]" in kol_(mi, "harfbuzz"))
+    # Yama 07 libjxl'in kapalı olduğuna dayanır (SK-941-3): freetype açık, libjxl bayrakla kapalı, açan bayrak yok.
+    s.tamam("ios.sh seçenekleri: freetype açık, --disable-lib-libjxl tam bir kez, libjxl'i açan bayrak yok",
+            "--enable-lib-freetype" in IOS_SECENEKLERI and IOS_SECENEKLERI.count("--disable-lib-libjxl") == 1
+            and not [o for o in IOS_SECENEKLERI if "libjxl" in o and o != "--disable-lib-libjxl"])
     # gerçek freetype yamaları çapa yokken ya da iki kez varken uygulanmaz (SK-936-3, SK-938-4, brotli)
     for ad_, dosya_, parca_, iki_ in (("autogen.sh", ("src", "freetype", "autogen.sh"), FREETYPE_AUTOGEN_SH, "    git submodule update --init\n"),
                                       ("freetype.sh", ("scripts", "apple", "freetype.sh"), NEXT_FREETYPE_SH, "  --with-brotli=yes \\\n"),

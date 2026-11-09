@@ -1131,8 +1131,11 @@ def belirtec_ayir(ham):
     yeniden = " ".join(belirtec_tirnakla(t) for t in belirtecler)
     if yeniden != ham:
         i = next((n for n, (a, b) in enumerate(zip(yeniden, ham)) if a != b), min(len(yeniden), len(ham)))
-        baslangic = max(0, i - 8)
-        raise Kirmizi("configure dizesi FFmpeg'in tırnaklama biçiminde değil (ilk fark %d. bayt: %s)" % (i, gizle(ham[baslangic:baslangic + 40])))
+        # Önce gizle sonra kes: kesit belirteç başına hizalanır (farktan hemen önceki belirteçten başlar; fark fazladan boşluktaysa
+        # o belirteç farkın sol komşusudur) ve satır sonuna kadar gizle'den geçer. Bayt ortasından başlayan kesitte NAME=değer'in
+        # NAME'i kesilir, gizle değeri tanımaz ve değer mesaja (herkese açık adım günlüğüne) girerdi.
+        baslangic = ham.rfind(" ", 0, max(i - 1, 0)) + 1
+        raise Kirmizi("configure dizesi FFmpeg'in tırnaklama biçiminde değil (ilk fark %d. bayt: %s)" % (i, gizle(ham[baslangic:])[:40]))
     return belirtecler
 
 
@@ -3111,6 +3114,18 @@ def _selftest_icerik(s, kok):
     except Kirmizi as e:
         gizli_mesaj = str(e)
     s.tamam("belirtec_ayir: mesajdaki kesit gizlenir", "ilk fark" in gizli_mesaj and "cok-gizli" not in gizli_mesaj and "API_TOKEN=***" in gizli_mesaj)
+    # SK-946-1 (m-945-1): kesit belirteç başından başlar; önce kesip sonra gizlemek anahtar adını keser ve değerin kuyruğunu sızdırırdı
+    for ad_, ham_ in (("kısa", "--x API_TOKEN=abcdefghij  --y"),
+                      ("uzun değer", "--x API_TOKEN=" + "abcdefghij" * 6 + "  --y"),
+                      ("fazladan tırnaklı", '--x API_TOKEN=abcdefghij"k" --y')):
+        kesit_mesaj = ""
+        try:
+            belirtec_ayir(ham_)
+        except Kirmizi as e:
+            kesit_mesaj = str(e)
+        kesit_ = kesit_mesaj.split("bayt: ", 1)[1].rstrip(")") if "bayt: " in kesit_mesaj else ""
+        s.tamam("belirtec_ayir: %s değerde kesit belirteç başından başlar, değerin kuyruğu sızmaz (SK-946-1)" % ad_,
+                "ilk fark" in kesit_mesaj and "defghij" not in kesit_mesaj and "API_TOKEN=***" in kesit_ and 0 < len(kesit_) <= 40)
 
     sayac = [0]
 

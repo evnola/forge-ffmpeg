@@ -297,7 +297,15 @@ a path that already exists in the tree).
 - When the `build` job fails or is cancelled, `python3 build.py tani` collects the head and tail of `build.log` (sizes
   capped, the same masking applied), the `config.log`, `meson-log.txt` and CMake logs under `src/`, and a listing of
   `prebuilt/`, and the top-level names of `.tmp/` with their `lstat` type (`tmp-liste.txt`; names only, no contents and no
-  sizes, collected whatever `verify-lock` said, so a wrong set shows in the artifact without rebuilding). The workflow
+  sizes, collected whatever `verify-lock` said, so a wrong set shows in the artifact without rebuilding).
+  From the FFmpeg source tree (`work/src/ffmpeg/`) it also takes exactly these 11 files, listed by name and never by glob:
+  `libavformat/protocol_list.c`, `libavformat/demuxer_list.c`, `libavformat/muxer_list.c`, `libavcodec/codec_list.c`,
+  `libavcodec/parser_list.c`, `libavcodec/bsf_list.c`, `libavfilter/filter_list.c`, `libavdevice/indev_list.c`,
+  `libavdevice/outdev_list.c` (the nine `*_list.c` files with the protocols, demuxers, muxers, codecs, parsers, bitstream
+  filters, filters and devices that were really compiled in), `ffbuild/config.fate` and `config.h` (the configure string
+  that FFmpeg wrote). Only the first 256 KiB of each file is taken, it goes through the same masking, and a symbolic link
+  anywhere in the path is not followed (the file is listed in `indeks.txt` as not taken). In the artifact a file is named
+  after its path below `work/` with `/` written as `__`, for example `src__ffmpeg__config.h`. The workflow
   uploads them as the artifact `tani-<run id>` with a 3-day retention; they are never part of a release.
   The build runs in an allow-listed environment, so the logs are not expected to contain secrets; the masking is a second
   line of defence, not a guarantee.

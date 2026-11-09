@@ -32,7 +32,7 @@ Each release contains:
 
 `forge-ffmpeg-src-<tag>.tar.xz` of a release holds the complete corresponding source of the binaries in that release:
 
-- the 14 source trees at the locked commits, unpatched, exactly as stored by git (`<name>/…`), with `SOURCES.json`
+- the 15 source trees at the locked commits, unpatched, exactly as stored by git (`<name>/…`), with `SOURCES.json`
   (name, URL, tag, commit, tree) at the top level. The `dlg` tree is stored inside the FreeType tree, at
   `freetype/subprojects/dlg/…`, where FreeType's own submodule reference points (its record in `SOURCES.json` also has
   `parent` and `path`);
@@ -59,11 +59,30 @@ Locked sources (the commit of each one is in `lock.json`):
 | libvpx | v1.16.0 | https://github.com/arthenica/libvpx |
 | Opus | v1.5.2 | https://github.com/arthenica/opus |
 | GNU config scripts (build tool, not linked) | v20210814 | https://github.com/arthenica/gnu-config |
+| gas-preprocessor (build tool, not linked; GPL version 2 or later, as stated in the header of `gas-preprocessor.pl`; see below) | v20210917 (commit `d09971fad329d32df19f5bbafe88cf2f0ed04ed7`) | https://github.com/arthenica/gas-preprocessor |
 | dlg (FreeType's `subprojects/dlg`, Boost Software License 1.0; build input only, see below) | master, 2025-07-20 | https://github.com/nyorain/dlg (no mirror; a single author's repository) |
 
 Every source is fetched by commit SHA (`git fetch --depth 1 <url> <commit>`) and the build stops if the SHA cannot be
 fetched; it never falls back to a tag or a branch. The commit of each tree is checked against `lock.json` before the
 build and again after it, and any directory under `src/` or `.tmp/source/` that is not in the lock fails the build.
+
+`gas-preprocessor.pl` is a Perl script that FFmpegKitNext hands to every arm64 library as its assembler (`AS`), so all aarch64
+assembly of the FFmpeg libraries is pre-processed by it. It is a build tool: it does not end up in the frameworks, and the
+licence line in its header (`This code is licensed under GPLv2 or later`) is the only licence statement the upstream tree has.
+Next downloads it from a movable tag URL when it is missing; `build.py` therefore locks it like the other sources and the
+build never downloads it:
+
+- `lock.json` has the commit and, only for this source, a `sha256` key with the SHA-256 of the blob `gas-preprocessor.pl` at
+  that commit (the lock is by commit and hash; the tag in `ref` is only checked to point at the commit). The file is read
+  from the fetched git object, its hash is compared with the lock, and the build stops if they differ.
+- Before `ios.sh` starts, `build.py` writes `work/.tmp/gas-preprocessor.pl` (mode 0755, a new regular file; an existing path
+  or a link stops the build). The bytes are the locked blob after the same two string replacements that Next's own `sed`
+  makes (`s+({` to `s+(\{` and `s*})` to `s*\})`, each exactly once; they stop an unescaped brace error of newer Perl), and
+  their SHA-256 is a constant in `build.py` that is checked at placement time. Next then finds the file and skips its
+  download branch (see patch 08 below).
+- `verify-lock` compares the placed file with that SHA-256 before and after the build, and before the build it also requires
+  the top level of `.tmp/` to be exactly `source` and `gas-preprocessor.pl`.
+- The Perl that runs the script is the first `perl` on `PATH`; `toolchain.txt` records its path and version.
 
 No locked tree may contain a git submodule reference (gitlink) or a `.gitmodules` file, with two exceptions that are a
 fixed table in `build.py` (not read from `lock.json` or from arguments):
@@ -190,6 +209,15 @@ All changes are applied by `build.py` (the patch files carry the date and the no
   `freetype` case no longer waits for libjxl (`[[ $OK_libpng -eq 1 ]] && [[ $OK_libjxl -eq 1 ]]` becomes
   `[[ $OK_libpng -eq 1 ]]`). libjxl is disabled by `--disable-lib-libjxl`, so it is never built and `OK_libjxl` is never
   set; without this patch the loop would wait for it forever. FreeType does not use libjxl.
+- `patches/08-gas-preprocessor-no-download.json`: in `set_toolchain_paths` of `scripts/function-ios.sh` of FFmpegKitNext,
+  the branch that downloads `gas-preprocessor.pl`, makes it executable and patches it with `sed` is replaced by a log line
+  and an unconditional `exit 1`. `build.py` places the locked file before `ios.sh`, so the branch is dead code; if the file
+  is ever missing, the build stops instead of downloading. (Next's own error path runs `exit 1` inside a command
+  substitution, which does not stop the build.) `scripts/main-ios.sh` also calls this function, for FFmpeg; the `exit 1`
+  inside the function covers that call too.
+- `patches/09-run-apple-toolchain-exit.json`: in `scripts/run-apple.sh` of FFmpegKitNext, `set_toolchain_paths "${LIB_NAME}"`
+  becomes `set_toolchain_paths "${LIB_NAME}" || exit 1`. The script ignored the return code, so a library could be
+  configured with an empty toolchain and an empty pkg-config install directory.
 - libpng: no libpng patch is applied because `pngpriv.h` of the locked libpng does not contain the `TARGET_OS_MAC`
   condition. `build.py` measures this in the `patch` stage (the build fails if the condition appears) and records the
   result in `toolchain.txt`.
@@ -235,6 +263,12 @@ without network access. What stops or detects this:
   `BROTLI_LIBS`) and the log therefore contains "Package libbrotlidec was not found" on every build. With patch 05 those
   variables are not used, and the lines are deliberately not patched. Nothing that reads `build.log` may key on
   "not found" or "libbrotlidec"; the brotli checks above are the evidence.
+
+- `gas-preprocessor.pl` is locked, placed before the build and checked in both `verify-lock` stages, and patches 08 and 09
+  stop the build instead of downloading it (see above).
+- `derle` fails the build, even if `ios.sh` succeeded, when `build.log` contains one of the two lines that Next's `download()`
+  writes: `DEBUG: Downloaded ` or `ERROR: Failed to download`. This build is not expected to download anything. (The
+  `clone_git_repository_with_*` functions write other lines; their targets are covered by `verify-lock`.)
 
 Not covered: a download that leaves none of these traces (for example a file fetched into a temporary directory or into
 a path that already exists in the tree).

@@ -3126,6 +3126,15 @@ def _selftest_icerik(s, kok):
         kesit_ = kesit_mesaj.split("bayt: ", 1)[1].rstrip(")") if "bayt: " in kesit_mesaj else ""
         s.tamam("belirtec_ayir: %s değerde kesit belirteç başından başlar, değerin kuyruğu sızmaz (SK-946-1)" % ad_,
                 "ilk fark" in kesit_mesaj and "defghij" not in kesit_mesaj and "API_TOKEN=***" in kesit_ and 0 < len(kesit_) <= 40)
+    # M-954-1: kapanış ayıracı isteyen kalıp (kimlik@) 40 bayttan önce biter; önce kesen sıra parolayı açık bırakırdı
+    kesit_mesaj = ""
+    try:
+        belirtec_ayir("--a  --b=https://user:secretpasswordlongerXYZ@host/x")
+    except Kirmizi as e:
+        kesit_mesaj = str(e)
+    kesit_ = kesit_mesaj.split("bayt: ", 1)[1].rstrip(")") if "bayt: " in kesit_mesaj else ""
+    s.tamam("belirtec_ayir: kimlik@ kalıbında parola kesitte kalmaz (M-954-1)",
+            "ilk fark" in kesit_mesaj and "secretpassword" not in kesit_mesaj and "://***@" in kesit_ and 0 < len(kesit_) <= 40)
 
     sayac = [0]
 

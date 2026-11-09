@@ -296,6 +296,82 @@ def fetch(work, kilit, dosya_izni=False):
     for k in fetch_sirasi(kilit):
         kaynak_cek(k, agac_yolu(work, k["name"]), dosya_izni)
         print("fetch: %s %s %s" % (k["name"], k["ref"], k["commit"][:12]))
+    gas_yerlestir(work, kilit)
+
+
+# MARK: - gas-preprocessor.pl
+
+# Next, arm64 kütüphanelerinin `AS` değişkenine .tmp/gas-preprocessor.pl'i koyar (FFmpeg'in aarch64 .S dosyaları bu Perl betiğinden geçer) ve
+# dosya yoksa onu kilitsiz bir etiket URL'sinden indirir (function-ios.sh set_toolchain_paths). Bu yüzden betik kilitlenir, ios.sh'tan ÖNCE
+# yerleştirilir ve Next'in indirme dalı yamayla kapatılır (patches/08). Yerleştirme `sonra` kipinde de bayt bayt aynı doğrulanır.
+GAS_DOSYASI = "gas-preprocessor.pl"
+# Next'in indirme dalındaki `sed -i 's/s+({/s+(\\{/g;s/s\*})/s*\\})/g'` komutunun eşdeğeri (Perl 5.32'de kaçışsız { düzenli ifadede ölümcül).
+# İki parça da düz metindir (BRE'de { ve } özel değil, \* kaçışlı); sed /g'dir, ama gerçek betikte her biri tam bir kez geçer ve sabitlenir.
+# Dönüşüm yerleştirme anındadır (ios.sh'tan önce): ios.sh sırasında .tmp/'ye yazan bir yama bu güvencenin gevşetilmesi olurdu.
+GAS_DONUSUMLERI = ((b"s+({", b"s+(\\{"), (b"s*})", b"s*\\})"))
+# Kilitli blob (lock.json sha256) + yukarıdaki dönüşüm = yerleştirilen baytlar. 2026-11-09'da gerçek blob'a hem GNU sed 4.9 hem bu işlevle
+# uygulanıp aynı çıktı alındı; runner'da ölçülmedi.
+GAS_SON_SHA256 = "ed085dd43ed95759a2b84afc3b1f9b0b64114b586d0d4b16fbe164b4369ae844"
+
+
+def gas_donustur(veri):
+    for eski, _ in GAS_DONUSUMLERI:
+        kirmizi_if(veri.count(eski) != 1, "%s: %r tam bir kez bulunmalı (%d bulundu); dönüşüm uygulanmadı" % (GAS_DOSYASI, eski, veri.count(eski)))
+    for eski, yeni in GAS_DONUSUMLERI:
+        veri = veri.replace(eski, yeni)
+    return veri
+
+
+def gas_yerlestir(work, kilit):
+    """Kilitli commit'in nesnesinden (çalışma ağacından değil) betiği okur, kilitteki blob SHA-256'sını denetler, dönüşümü uygular, son
+    SHA-256'yı sabitle karşılaştırır ve work/.tmp/gas-preprocessor.pl olarak yazar (0755, yeni normal dosya; var olan yol ya da bağ kırmızı)."""
+    k = kaynak_haritasi(kilit)[GAS_ADI]
+    yol = agac_yolu(work, GAS_ADI)
+    out = git_ok(["ls-tree", "-z", k["commit"], "--", GAS_DOSYASI], yol)
+    kayitlar = [r for r in out.split(b"\0") if r]
+    kirmizi_if(len(kayitlar) != 1, "%s: kilitli commit'te %s bulunamadı" % (GAS_ADI, GAS_DOSYASI))
+    bilgi, _, ad_b = kayitlar[0].partition(b"\t")
+    mod, tip, sha = bilgi.split(b" ")
+    kirmizi_if(ad_b != GAS_DOSYASI.encode() or tip != b"blob" or mod not in (b"100644", b"100755"), "%s: %s normal dosya değil" % (GAS_ADI, GAS_DOSYASI))
+    ham = git_ok(["cat-file", "blob", sha.decode("ascii")], yol)
+    kirmizi_if(hashlib.sha256(ham).hexdigest() != k["sha256"], "%s: blob SHA-256'sı lock.json'daki değil" % GAS_DOSYASI)
+    son = gas_donustur(ham)
+    kirmizi_if(hashlib.sha256(son).hexdigest() != GAS_SON_SHA256, "%s: dönüşümden sonraki SHA-256 beklenen sabit değil" % GAS_DOSYASI)
+    tmp = os.path.join(work, ".tmp")
+    os.makedirs(tmp, exist_ok=True)
+    hedef = os.path.join(tmp, GAS_DOSYASI)
+    try:
+        fd = os.open(hedef, os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_BINARY", 0), 0o755)
+    except OSError:
+        raise Kirmizi("%s zaten var ya da yazılamadı" % os.path.relpath(hedef, work).replace(os.sep, "/"))
+    with os.fdopen(fd, "wb") as f:
+        f.write(son)
+    os.chmod(hedef, 0o755)
+    sorun = gas_dosyasi_sorunlari(work)
+    kirmizi_if(sorun, "yerleştirilen %s: %s" % (GAS_DOSYASI, "; ".join(sorun)))
+    print("fetch: %s yerleştirildi (sha256 %s)" % (GAS_DOSYASI, GAS_SON_SHA256[:12]))
+
+
+def gas_dosyasi_sorunlari(work):
+    """work/.tmp/gas-preprocessor.pl yerinde, normal dosya (bağ değil), 0755 (POSIX'te) ve baytları GAS_SON_SHA256 mi? verify-lock her iki kipte koşar."""
+    hedef = os.path.join(work, ".tmp", GAS_DOSYASI)
+    try:
+        st = os.lstat(hedef)
+    except OSError:
+        return [".tmp/%s yok" % GAS_DOSYASI]
+    if not stat.S_ISREG(st.st_mode):
+        return [".tmp/%s normal dosya değil (bağ ya da dizin)" % GAS_DOSYASI]
+    sorun = []
+    if os.name == "posix" and stat.S_IMODE(st.st_mode) != 0o755:
+        sorun.append(".tmp/%s kipi 0755 değil" % GAS_DOSYASI)
+    try:
+        with open(hedef, "rb") as f:
+            veri = f.read()
+    except OSError:
+        return sorun + [".tmp/%s okunamadı" % GAS_DOSYASI]
+    if hashlib.sha256(veri).hexdigest() != GAS_SON_SHA256:
+        sorun.append(".tmp/%s baytları yerleştirilen değil (sha256 %s)" % (GAS_DOSYASI, hashlib.sha256(veri).hexdigest()[:12]))
+    return sorun
 
 
 def ic_gitlink_uygun(ad, yol_b, sha, ic_kilit):
@@ -397,7 +473,8 @@ def agac_ici_sorunlari(yol, commit, ad):
 def kilit_dogrula(work, kilit, asama, dosya_izni=False):
     """İki yönlü kilit denetimi. asama "once": (a)(b)(c)(d); "sonra": (a)(b)(d) (Next ve yamalarımız ağaçları kirletir).
     Her iki aşamada ayrıca gitlink/.gitmodules istisna tablosu (altmodul_sorunlari) ve ağaç içi indirme denetimi (agac_ici_sorunlari) koşar.
-    İç içe kaynak (dlg) için "sonra" kipinde de HEAD kilide eşit ve durum boş olmalıdır."""
+    İç içe kaynak (dlg) için "sonra" kipinde de HEAD kilide eşit ve durum boş olmalıdır.
+    İki kipte de (e) .tmp/gas-preprocessor.pl baytları; yalnız "once" kipinde (f) .tmp/ üst düzey kümesi denetlenir."""
     kirmizi_if(asama not in ("once", "sonra"), "asama once ya da sonra olmalı")
     sorunlar = []
     ic_kilit = dict((k["name"], k["commit"]) for k in kilit["sources"] if k["name"] in IC_KAYNAKLAR)
@@ -430,6 +507,13 @@ def kilit_dogrula(work, kilit, asama, dosya_izni=False):
         for girdi in sorted(os.listdir(ust)):
             if girdi not in beklenen:
                 sorunlar.append("%s/%s kilitte yok" % (os.path.relpath(ust, work).replace(os.sep, "/"), girdi))
+    # (e) gas-preprocessor.pl iki kipte de yerleştirildiği baytlarla aynı olmalı (Next onu AS olarak çalıştırır).
+    sorunlar += gas_dosyasi_sorunlari(work)
+    # (f) .tmp/ üst düzeyi: derleme başlamadan yalnız {source, gas-preprocessor.pl}. Next'in derleme sırasında yazdığı çıktılar
+    # (.tmp/cmake, .tmp/bundle-apple-universal-*) `sonra` kipinde meşrudur; o kipin üst düzey kümesi security kararını bekliyor (#948).
+    if asama == "once" and os.path.isdir(os.path.join(work, ".tmp")):
+        for girdi in sorted(set(os.listdir(os.path.join(work, ".tmp"))) - set(["source", GAS_DOSYASI])):
+            sorunlar.append(".tmp/%s kilitte yok" % girdi)
     if sorunlar:
         raise Kirmizi("kilit denetimi (%s) başarısız:\n  - %s" % (asama, "\n  - ".join(sorunlar[:30])))
     print("verify-lock (%s): %d kaynak kilitle aynı, kilitte olmayan dizin yok" % (asama, len(kilit["sources"])))
@@ -1379,6 +1463,10 @@ def arac_kaydi(rapor_yamalar, etiket, calistir_satir=calistir_satir):
     sat.append("python3: " + sys.version.split()[0])
     sat.append("git: " + calistir_satir(["git", "--version"]))
     sat.append("brew: " + calistir_satir(["brew", "--version"], env))
+    # gas-preprocessor.pl `#!/usr/bin/env perl` ile açılır: PATH'teki ilk perl çalışır. Sürümü bu satırlar kaydeder (ilk koşuya kadar ölçülmedi).
+    sat.append("perl (PATH'te ilk: %s): %s" % (shutil.which("perl", path=env["PATH"]) or "yok", calistir_satir(["perl", "-v"], env)))
+    sat.append("/usr/bin/perl: " + calistir_satir(["/usr/bin/perl", "-v"], env))
+    sat.append("gas-preprocessor.pl (yerleştirilen) sha256: " + GAS_SON_SHA256)
     for a in ("autoconf", "automake", "glibtool", "pkg-config", "cmake", "meson", "ninja", "nasm", "yasm", "gperf", "bison", "makeinfo", "gsed"):
         sat.append("%s: %s" % (a, calistir_satir([a, "--version"], env)))
     for anahtar in ("ImageOS", "ImageVersion", "GITHUB_RUN_ID", "GITHUB_SHA", "GITHUB_REF"):
@@ -2003,11 +2091,18 @@ def _yml_adim_sinamalari(s, kok, yml):
 
 
 def selftest():
+    global GAS_SON_SHA256
     s = Sinama()
     kok = tempfile.mkdtemp(prefix="forge-ffmpeg-selftest-")
+    gercek_gas_son = GAS_SON_SHA256
+    # Gerçek sabit önce sabitlenir; sahte kaynak depolar gerçek betiği taşımadığı için aşağıdaki sınamalar sahte betiğin dönüşüm özetiyle koşar.
+    s.tamam("GAS_SON_SHA256: gerçek betik (sha256 78ad0635…) + dönüşüm için ölçülen değer",
+            gercek_gas_son == "ed085dd43ed95759a2b84afc3b1f9b0b64114b586d0d4b16fbe164b4369ae844")
+    GAS_SON_SHA256 = hashlib.sha256(gas_donustur(GAS_SAHTE)).hexdigest()
     try:
         _selftest_icerik(s, kok)
     finally:
+        GAS_SON_SHA256 = gercek_gas_son
         try:
             _sil(kok)
         except OSError:
@@ -2118,6 +2213,80 @@ def _selftest_icerik(s, kok):
     s.kirmizi_olmali("verify-lock once: HEAD kayması", lambda: kilit_dogrula(work, sahte, "once", True), "HEAD")
     _sil(os.path.join(work, "src", "libass"))
     s.kirmizi_olmali("verify-lock: ağaç eksik", lambda: kilit_dogrula(work, sahte, "sonra", True), "yok")
+    # --- gas-preprocessor.pl: kilitli blob, dönüşüm, ios.sh'tan önce yerleştirme, iki kipte bayt denetimi (SK-947-1…4) ---
+    gercek_satir = rb'            if ($line =~ /(?:ld|st)\d\s+({\s*v(\d+)\.(\d[bhsdBHSD])\s*-\s*v(\d+)\.(\d[bhsdBHSD])\s*})/) {' + b"\n"
+    beklenen_satir = rb'            if ($line =~ /(?:ld|st)\d\s+(\{\s*v(\d+)\.(\d[bhsdBHSD])\s*-\s*v(\d+)\.(\d[bhsdBHSD])\s*\})/) {' + b"\n"
+    s.tamam("gas dönüşümü: Next'in sed'iyle gerçek betiğin 1066. satırında aynı sonucu verir (iki kaçış eklenir)", gas_donustur(gercek_satir) == beklenen_satir)
+    s.kirmizi_olmali("gas dönüşümü: parça yoksa kırmızı", lambda: gas_donustur(b"perl\n"), "tam bir kez")
+    s.kirmizi_olmali("gas dönüşümü: parça iki kez varsa kırmızı", lambda: gas_donustur(gercek_satir + gercek_satir), "tam bir kez")
+    wg = os.path.join(kok, "wg")
+    fetch(wg, sahte, True)
+    gas_hedef = os.path.join(wg, ".tmp", GAS_DOSYASI)
+    with open(gas_hedef, "rb") as f:
+        yerlesen = f.read()
+    s.tamam("gas: fetch .tmp/gas-preprocessor.pl'i kilitli blob + dönüşüm olarak yerleştirir (kaynak ağaçtaki dosya değişmez)",
+            yerlesen == gas_donustur(GAS_SAHTE) and yerlesen != GAS_SAHTE
+            and open(os.path.join(wg, ".tmp", "source", GAS_ADI, GAS_DOSYASI), "rb").read() == GAS_SAHTE)
+    s.tamam("gas: yerleştirilen dosya normal dosya, bağ değil, POSIX'te 0755",
+            stat.S_ISREG(os.lstat(gas_hedef).st_mode) and (os.name != "posix" or stat.S_IMODE(os.lstat(gas_hedef).st_mode) == 0o755))
+    kilit_dogrula(wg, sahte, "once", True)
+    kilit_dogrula(wg, sahte, "sonra", True)
+    s.tamam("gas: verify-lock once ve sonra yerleştirme sonrası yeşil", True)
+    s.kirmizi_olmali("gas: yerleştirme var olan yolu ezmez", lambda: gas_yerlestir(wg, sahte), "zaten var")
+    gas_yedek = yerlesen
+    for ad, bozuk_bayt in (("bir bayt değişti", yerlesen[:-1] + b"X"), ("dönüşümsüz kilitli blob", GAS_SAHTE), ("boş", b"")):
+        _yaz(gas_hedef, bozuk_bayt)
+        s.kirmizi_olmali("gas: verify-lock once, yerleştirilen dosya %s" % ad, lambda: kilit_dogrula(wg, sahte, "once", True), "baytları")
+        s.kirmizi_olmali("gas: verify-lock sonra, yerleştirilen dosya %s (Next ya da derleme değiştirmiş)" % ad, lambda: kilit_dogrula(wg, sahte, "sonra", True), "baytları")
+    os.remove(gas_hedef)
+    s.kirmizi_olmali("gas: verify-lock once, dosya yok", lambda: kilit_dogrula(wg, sahte, "once", True), "yok")
+    s.kirmizi_olmali("gas: verify-lock sonra, dosya yok", lambda: kilit_dogrula(wg, sahte, "sonra", True), "yok")
+    try:
+        os.symlink(os.path.join(wg, ".tmp", "source", GAS_ADI, GAS_DOSYASI), gas_hedef)
+        baglanabildi = True
+    except (OSError, NotImplementedError):
+        baglanabildi = False       # Windows'ta ayrıcalık yoksa bağ kurulamaz; POSIX koşularında bu sınama çalışır
+    if baglanabildi:
+        s.kirmizi_olmali("gas: yerleştirilen yol bağ ise verify-lock kırmızı", lambda: kilit_dogrula(wg, sahte, "sonra", True), "normal dosya değil")
+        os.remove(gas_hedef)
+    _yaz(gas_hedef, gas_yedek)
+    os.chmod(gas_hedef, 0o755)
+    kilit_dogrula(wg, sahte, "sonra", True)
+    if os.name == "posix":
+        os.chmod(gas_hedef, 0o644)
+        s.kirmizi_olmali("gas: yerleştirilen dosya 0755 değilse verify-lock kırmızı", lambda: kilit_dogrula(wg, sahte, "sonra", True), "0755")
+        os.chmod(gas_hedef, 0o755)
+    # .tmp/ üst düzey kümesi: derleme öncesi tam {source, gas-preprocessor.pl}
+    _yaz(os.path.join(wg, ".tmp", "indirilen.bin"), b"x")
+    s.kirmizi_olmali("gas: verify-lock once, .tmp/ altında fazladan dosya (Next indirmesi)", lambda: kilit_dogrula(wg, sahte, "once", True), ".tmp/indirilen.bin kilitte yok")
+    os.remove(os.path.join(wg, ".tmp", "indirilen.bin"))
+    os.makedirs(os.path.join(wg, ".tmp", "fazla-dizin"))
+    s.kirmizi_olmali("gas: verify-lock once, .tmp/ altında fazladan dizin", lambda: kilit_dogrula(wg, sahte, "once", True), ".tmp/fazla-dizin kilitte yok")
+    os.rmdir(os.path.join(wg, ".tmp", "fazla-dizin"))
+    kilit_dogrula(wg, sahte, "once", True)
+    # Next derlemesinin .tmp/cmake ve .tmp/bundle-apple-universal-* çıktıları `sonra` kipinde şimdilik kırmızı değil; kararı security verecek (#948).
+    os.makedirs(os.path.join(wg, ".tmp", "cmake", "build"))
+    kilit_dogrula(wg, sahte, "sonra", True)
+    shutil.rmtree(os.path.join(wg, ".tmp", "cmake"))
+    # kilit/commit tarafı: yanlış baytlı betik, eksik dosya, dönüşüm parçası eksik, dönüşüm sonrası beklenen sabit tutmuyor
+    yanlis_gas = _sahte_kilit(os.path.join(kok, "kg1"), {GAS_ADI: {GAS_DOSYASI: (GAS_SAHTE + b"# fazla\n", "100755")}})
+    s.kirmizi_olmali("gas: kilitteki sha256 ile commit'teki blob uyuşmazsa fetch kırmızı", lambda: fetch(os.path.join(kok, "wg2"), yanlis_gas, True), "lock.json'daki değil")
+    yok_gas = _sahte_kilit(os.path.join(kok, "kg2"), {GAS_ADI: {GAS_DOSYASI: None}})
+    s.kirmizi_olmali("gas: commit'te gas-preprocessor.pl yoksa fetch kırmızı", lambda: fetch(os.path.join(kok, "wg3"), yok_gas, True), "bulunamadı")
+    sembol_gas = _sahte_kilit(os.path.join(kok, "kg3"), {GAS_ADI: {GAS_DOSYASI: (b"gas-preprocessor.pl", "120000")}})
+    s.kirmizi_olmali("gas: commit'te gas-preprocessor.pl sembolik bağsa fetch kırmızı", lambda: fetch(os.path.join(kok, "wg4"), sembol_gas, True), "normal dosya değil")
+    for ad, icerik, parca in (("dönüşüm parçası yok", b"#!/usr/bin/env perl\n", "tam bir kez"),
+                              ("dönüşüm parçası iki kez", GAS_SAHTE + GAS_SAHTE, "tam bir kez"),
+                              ("dönüşüm sonrası sabitle uyuşmaz", GAS_SAHTE + b"# fazla\n", "beklenen sabit")):
+        k_gas = _sahte_kilit(os.path.join(kok, "kg-" + ad.replace(" ", "-")), {GAS_ADI: {GAS_DOSYASI: (icerik, "100755")}})
+        for k in k_gas["sources"]:
+            if k["name"] == GAS_ADI:
+                k["sha256"] = hashlib.sha256(icerik).hexdigest()    # kilit commit'teki blob'la tutarlı: kırmızı nedeni yalnız dönüşüm/sabit
+        s.kirmizi_olmali("gas: %s -> fetch kırmızı" % ad, lambda: fetch(os.path.join(kok, "wg5"), k_gas, True), parca)
+        if os.path.lexists(os.path.join(kok, "wg5")):
+            _sil(os.path.join(kok, "wg5"))
+    fetch_cagrilari = cagri_sirasi("fetch")
+    s.tamam("fetch: gas_yerlestir tüm kaynaklar çekildikten sonra, işlevin sonunda", fetch_cagrilari.index("gas_yerlestir") > fetch_cagrilari.index("kaynak_cek"))
     # alt modül (İ1/İ2) ve eşleşmeyen etiket
     # --- İ1/İ2 istisna tablosu (SK-936-1): altmodul_sorunlari, küçük sahte depolarla ---
     DLG = "395ccad2c1e0daae535c4d20bb0a3f2424648e17"
@@ -2352,6 +2521,8 @@ def _selftest_icerik(s, kok):
                 and tar.extractfile("opus/.gitmodules").read() == b"")
         s.tamam("arşiv: çalıştırılabilir bit ve bağ korunur", uyeler["ffmpeg/bin/arac"].mode == 0o755 and uyeler["ffmpeg/baglanti"].issym() and uyeler["ffmpeg/baglanti"].linkname == "README")
         s.tamam("arşiv: dosya baytları commit nesnesiyle aynı", tar.extractfile("ffmpeg/README").read() == b"kaynak ffmpeg\n")
+        s.tamam("arşiv: gas-preprocessor ağacı kilitli baytlarıyla (dönüşümsüz) ve çalıştırılabilir bitiyle arşivde",
+                tar.extractfile("gas-preprocessor/gas-preprocessor.pl").read() == GAS_SAHTE and uyeler["gas-preprocessor/gas-preprocessor.pl"].mode == 0o755)
         kayit = json.loads(tar.extractfile("SOURCES.json").read())
         s.tamam("arşiv: SOURCES.json ağaç SHA'sı dolu", all(COMMIT_RE.fullmatch(k["tree"]) for k in kayit) and len(kayit) == 15)
         dlg_kayit = [k for k in kayit if k["name"] == "dlg"]

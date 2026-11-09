@@ -93,6 +93,14 @@
       "commit": "805517123cbfe33d17c989a18e78c5789fab0437"
     },
     {
+      "name": "gas-preprocessor",
+      "url": "https://github.com/arthenica/gas-preprocessor",
+      "ref": "v20210917",
+      "version": "20210917",
+      "commit": "d09971fad329d32df19f5bbafe88cf2f0ed04ed7",
+      "sha256": "78ad06351ac8be513fb6e6291d9bb8f667899625c2649093e3b08f59fae950a2"
+    },
+    {
       "name": "dlg",
       "url": "https://github.com/nyorain/dlg",
       "ref": "395ccad2c1e0daae535c4d20bb0a3f2424648e17",

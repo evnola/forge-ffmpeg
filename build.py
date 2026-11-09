@@ -38,11 +38,18 @@ HERE = os.path.dirname(os.path.realpath(__file__))
 
 NEXT_ADI = "ffmpeg-kit-next"
 NEXT_REPO = "https://github.com/arthenica/ffmpeg-kit-next"
-# Kilitteki on dört kaynak ve Next'in beklediği yerleşim: Next kökte, bileşenler src/<ad>, gnu-config .tmp/source/config.
+# Kilitteki on beş kaynak ve Next'in beklediği yerleşim: Next kökte, bileşenler src/<ad>, gnu-config .tmp/source/config,
+# gas-preprocessor .tmp/source/gas-preprocessor (betiği build.py .tmp/ içine yerleştirir, aşağıda).
 # dlg FreeType'ın gitlink'idir (SK-936-2): yeri aşağıdaki sabit tabloda, src/ altında kendi dizini yoktur.
 KAYNAK_ADLARI = ["ffmpeg-kit-next", "ffmpeg", "expat", "fontconfig", "freetype", "fribidi", "harfbuzz",
-                 "lame", "libass", "libpng", "libvpx", "opus", "config", "dlg"]
+                 "lame", "libass", "libpng", "libvpx", "opus", "config", "gas-preprocessor", "dlg"]
 CONFIG_ADI = "config"
+GAS_ADI = "gas-preprocessor"
+# Next'in kaynak ağacı içinde değil .tmp/source/<ad> altında duran kilitli kaynaklar.
+TMP_KAYNAKLARI = (CONFIG_ADI, GAS_ADI)
+# SHA-256 anahtarı yalnız GAS_ADI girdisinde bulunur (kilitli blob'un özeti); başka girdide bulunması da, GAS_ADI'da olmaması da kırmızıdır.
+KAYNAK_ANAHTARLARI = frozenset(["name", "url", "ref", "version", "commit"])
+GAS_ANAHTARLARI = KAYNAK_ANAHTARLARI | frozenset(["sha256"])
 # İç içe kaynak -> (üst ağaç, üst ağaçtaki yol). Kapalı tablodur: lock.json'dan ya da argümandan istisna gelmez (SK-936-1).
 IC_KAYNAKLAR = {"dlg": ("freetype", "subprojects/dlg")}
 # İ2: kökteki .gitmodules için izinli blob SHA'ları. Boş blob yalnız hiç gitlink olmayan ağaçta, FreeType'ınki yalnız İ1 sağlanan
@@ -111,6 +118,7 @@ LISTE_SON_BASLIK = "# authoritative manifest: lgpl-manifest.json (committed sour
 ETIKET_RE = re.compile(r"v[0-9]+\.[0-9]+\.[0-9]+-forge\.[0-9]+")
 DENEME_RE = re.compile(r"deneme-[0-9a-f]{7}")
 COMMIT_RE = re.compile(r"[0-9a-f]{40}")
+SHA256_RE = re.compile(r"[0-9a-f]{64}")
 SHA256_RE = re.compile(r"[0-9a-f]{64}")
 URL_RE = re.compile(r"https://github\.com/[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+")
 REF_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]*")
@@ -214,8 +222,8 @@ def kilit_oku(yol, siki=True, dosya_izni=False):
     adlar = []
     eksik = []
     for k in kaynaklar:
-        kirmizi_if(not isinstance(k, dict) or set(k) != set(["name", "url", "ref", "version", "commit"]),
-                   "kaynak girdisi name, url, ref, version, commit anahtarlarını taşımalı")
+        kirmizi_if(not isinstance(k, dict) or set(k) != (GAS_ANAHTARLARI if k.get("name") == GAS_ADI else KAYNAK_ANAHTARLARI),
+                   "kaynak girdisi name, url, ref, version, commit anahtarlarını taşımalı (sha256 yalnız %s girdisinde, orada zorunlu)" % GAS_ADI)
         for alan in ("name", "url", "ref", "version"):
             kirmizi_if(not isinstance(k[alan], str) or not k[alan], "%s alanı boş ya da dize değil" % alan)
         ad = k["name"]
@@ -231,7 +239,9 @@ def kilit_oku(yol, siki=True, dosya_izni=False):
             eksik.append(ad)
         else:
             kirmizi_if(not isinstance(c, str) or COMMIT_RE.fullmatch(c) is None, "%s: commit 40 küçük hex değil" % ad)
-    kirmizi_if(sorted(adlar) != sorted(KAYNAK_ADLARI), "kaynak kümesi beklenen on dört ad değil (eksik ya da fazla)")
+        if ad == GAS_ADI:
+            kirmizi_if(not isinstance(k["sha256"], str) or SHA256_RE.fullmatch(k["sha256"]) is None, "%s: sha256 64 küçük hex değil" % ad)
+    kirmizi_if(sorted(adlar) != sorted(KAYNAK_ADLARI), "kaynak kümesi beklenen on beş ad değil (eksik ya da fazla)")
     if siki:
         kirmizi_if(eksik, "commit'i doğrulanmamış kaynak var (lock.json'a doğrulanmış commit yazılmadan derlenmez): %s" % ", ".join(eksik))
     return {"sources": kaynaklar, "unverified": eksik, "bytes": veri}
@@ -244,8 +254,8 @@ def kaynak_haritasi(kilit):
 def agac_yolu(work, ad):
     if ad == NEXT_ADI:
         return work
-    if ad == CONFIG_ADI:
-        return os.path.join(work, ".tmp", "source", CONFIG_ADI)
+    if ad in TMP_KAYNAKLARI:
+        return os.path.join(work, ".tmp", "source", ad)
     if ad in IC_KAYNAKLAR:
         ust, goreli = IC_KAYNAKLAR[ad]
         return os.path.join(agac_yolu(work, ust), *goreli.split("/"))
@@ -412,8 +422,8 @@ def kilit_dogrula(work, kilit, asama, dosya_izni=False):
         except Kirmizi as e:
             sorunlar.append("%s: %s" % (ad, e))
     # (b) src/ ve .tmp/source/ altında kilitte olmayan hiçbir girdi yok; Next'in kendi indirmesi de buraya düşer.
-    for ust, beklenen in ((os.path.join(work, "src"), [a for a in KAYNAK_ADLARI if a not in (NEXT_ADI, CONFIG_ADI) and a not in IC_KAYNAKLAR]),
-                          (os.path.join(work, ".tmp", "source"), [CONFIG_ADI])):
+    for ust, beklenen in ((os.path.join(work, "src"), [a for a in KAYNAK_ADLARI if a != NEXT_ADI and a not in TMP_KAYNAKLARI and a not in IC_KAYNAKLAR]),
+                          (os.path.join(work, ".tmp", "source"), list(TMP_KAYNAKLARI))):
         if not os.path.isdir(ust):
             sorunlar.append("%s yok" % os.path.relpath(ust, work).replace(os.sep, "/"))
             continue
@@ -1653,8 +1663,13 @@ def _git_deposu(yol, dosyalar, etiket=None):
 FREETYPE_GITMODULES_ICERIK = b'[submodule "dlg"]\n\tpath = subprojects/dlg\n\turl = https://github.com/nyorain/dlg.git\n'
 
 
+# Sahte gas-preprocessor.pl: gerçek betiğin dönüşüme giren iki Perl düzenli ifade parçasını (her biri tam bir kez) ve GPL başlığını taşır.
+GAS_SAHTE = (b"#!/usr/bin/env perl\n# This code is licensed under GPLv2 or later\n"
+             b"my $a = qr/(?:ld|st)\\d\\s+({\\s*v(\\d+)\\s*})/;\n")
+
+
 def _sahte_kilit(kok, bozuk=None):
-    """On dört sahte kaynak depo + onlara file:// ile işaret eden kilit. bozuk: {ad: {yol: (bayt, kip) ya da None (sil)}}.
+    """On beş sahte kaynak depo + onlara file:// ile işaret eden kilit. bozuk: {ad: {yol: (bayt, kip) ya da None (sil)}}.
     Gerçek yerleşim taklit edilir: freetype'ta dlg gitlink'i + gerçek .gitmodules, opus'ta boş .gitmodules.
     dlg önce yapılır: freetype'ın gitlink'i onun commit'ine işaret eder."""
     kaynaklar = {}
@@ -1670,6 +1685,8 @@ def _sahte_kilit(kok, bozuk=None):
             dosyalar.update({".gitmodules": (FREETYPE_GITMODULES_ICERIK, "100644"), "subprojects/dlg": (kaynaklar["dlg"]["commit"], "160000")})
         if ad == "opus":
             dosyalar[".gitmodules"] = (b"", "100644")
+        if ad == GAS_ADI:
+            dosyalar["gas-preprocessor.pl"] = (GAS_SAHTE, "100755")
         for p, v in (bozuk or {}).get(ad, {}).items():
             if v is None:
                 dosyalar.pop(p, None)
@@ -1679,6 +1696,8 @@ def _sahte_kilit(kok, bozuk=None):
         commit = _git_deposu(yol, dosyalar, etiket="s-" + ad)
         kaynaklar[ad] = {"name": ad, "url": "file:///" + yol.replace("\\", "/").lstrip("/"), "ref": "s-" + ad,
                          "version": "1", "commit": commit}
+        if ad == GAS_ADI:
+            kaynaklar[ad]["sha256"] = hashlib.sha256(GAS_SAHTE).hexdigest()
     return {"sources": [kaynaklar[a] for a in KAYNAK_ADLARI], "unverified": [], "bytes": b"{}\n"}
 
 
@@ -2019,8 +2038,13 @@ def _selftest_icerik(s, kok):
     # --- gerçek lock.json biçimi ---
     try:
         gercek = kilit_oku(os.path.join(HERE, "lock.json"), siki=False)
-        s.tamam("lock.json biçimi geçerli (14 kaynak)", len(gercek["sources"]) == 14)
+        s.tamam("lock.json biçimi geçerli (15 kaynak)", len(gercek["sources"]) == 15)
         print("selftest: lock.json'da commit'i doğrulanmamış kaynak: %d" % len(gercek["unverified"]))
+        gas = [k for k in gercek["sources"] if k["name"] == GAS_ADI]
+        s.tamam("lock.json: gas-preprocessor commit ve blob SHA-256'sı bu turda ölçülen değerler (etiketle değil, SHA'yla kilit)",
+                len(gas) == 1 and gas[0]["commit"] == "d09971fad329d32df19f5bbafe88cf2f0ed04ed7"
+                and gas[0]["sha256"] == "78ad06351ac8be513fb6e6291d9bb8f667899625c2649093e3b08f59fae950a2"
+                and gas[0]["url"] == "https://github.com/arthenica/gas-preprocessor")
     except Kirmizi as e:
         s.tamam("lock.json biçimi geçerli: %s" % e, False)
     for ad, deger in (("etiket", ETIKET_RE), ("deneme", DENEME_RE)):
@@ -2031,7 +2055,7 @@ def _selftest_icerik(s, kok):
     sahte = _sahte_kilit(os.path.join(kok, "k1"))
     lp = os.path.join(kok, "k1", "lock.json")
     _kilit_dosyasi(lp, sahte)
-    s.tamam("sahte kilit geçerli", len(kilit_oku(lp, dosya_izni=True)["sources"]) == 14)
+    s.tamam("sahte kilit geçerli", len(kilit_oku(lp, dosya_izni=True)["sources"]) == 15)
     nesne = json.load(open(lp))
 
     def varyant(ad, degistir, parca):
@@ -2043,10 +2067,19 @@ def _selftest_icerik(s, kok):
 
     varyant("büyük harfli commit", lambda o: o["sources"][1].update(commit=o["sources"][1]["commit"].upper()), "40 küçük hex")
     varyant("kısa commit", lambda o: o["sources"][1].update(commit="abc123"), "40 küçük hex")
-    varyant("eksik kaynak", lambda o: o["sources"].pop(), "on dört")
-    varyant("fazla kaynak", lambda o: o["sources"].append(dict(o["sources"][0], name="fazla")), "on dört")
+    varyant("eksik kaynak", lambda o: o["sources"].pop(), "on beş")
+    varyant("fazla kaynak", lambda o: o["sources"].append(dict(o["sources"][0], name="fazla")), "on beş")
     varyant("yinelenen kaynak", lambda o: o["sources"].append(dict(o["sources"][0])), "yinelenen")
     varyant("bilinmeyen anahtar", lambda o: o["sources"][0].update(ek="x"), "anahtarlarını")
+
+    def gas_girdisi(o):
+        return [k for k in o["sources"] if k["name"] == GAS_ADI][0]
+
+    varyant("gas-preprocessor'da sha256 yok", lambda o: gas_girdisi(o).pop("sha256"), "anahtarlarını")
+    varyant("başka kaynakta sha256 var", lambda o: o["sources"][0].update(sha256="a" * 64), "anahtarlarını")
+    varyant("gas sha256 büyük harfli", lambda o: gas_girdisi(o).update(sha256=gas_girdisi(o)["sha256"].upper()), "sha256 64")
+    varyant("gas sha256 kısa", lambda o: gas_girdisi(o).update(sha256="abc"), "sha256 64")
+    varyant("gas sha256 dize değil", lambda o: gas_girdisi(o).update(sha256=None), "sha256 64")
     varyant("commit yok (doğrulanmadı)", lambda o: o["sources"][2].update(commit=None), "doğrulanmamış")
     varyant("url .git soneki", lambda o: o["sources"][0].update(url="https://github.com/arthenica/ffmpeg-kit-next.git"), "url")
     varyant("url http", lambda o: o["sources"][0].update(url="http://github.com/arthenica/ffmpeg-kit-next"), "url")
@@ -2064,7 +2097,8 @@ def _selftest_icerik(s, kok):
     s.kirmizi_olmali("fetch: çalışma dizini var", lambda: fetch(work, sahte, True), "zaten var")
     s.tamam("fetch: Next kökte, bileşen src/ altında, gnu-config .tmp/source/config",
             os.path.isdir(os.path.join(work, ".git")) and os.path.isdir(os.path.join(work, "src", "ffmpeg", ".git"))
-            and os.path.isdir(os.path.join(work, ".tmp", "source", "config", ".git")))
+            and os.path.isdir(os.path.join(work, ".tmp", "source", "config", ".git"))
+            and os.path.isdir(os.path.join(work, ".tmp", "source", GAS_ADI, ".git")))
     # derleme sonrası kirlenme: "sonra" geçer, "once" temiz değil der
     _yaz(os.path.join(work, "src", "ffmpeg", "README"), b"degisti\n")
     _yaz(os.path.join(work, "yeni_dosya"), b"x")
@@ -2309,7 +2343,7 @@ def _selftest_icerik(s, kok):
         adlar = set(tar.getnames())
         uyeler = dict((m.name, m) for m in tar.getmembers())
         s.tamam("arşiv: export-ignore'lu dosya da arşivde (git archive olmadan)", "ffmpeg/README" in adlar)
-        s.tamam("arşiv: 14 ağaç (dlg freetype içinde) + SOURCES.json + V15 dosyası",
+        s.tamam("arşiv: 15 ağaç (dlg freetype içinde) + SOURCES.json + V15 dosyası",
                 all(arsiv_oneki(a) + "/README" in adlar for a in KAYNAK_ADLARI) and "SOURCES.json" in adlar and "forge-ffmpeg/build.py" in adlar)
         s.tamam("arşiv: dlg ağacı freetype/subprojects/dlg altında (başlık ve lisans dosyası dahil), üst düzeyde dlg/ yok",
                 "freetype/subprojects/dlg/include/dlg/dlg.h" in adlar and "freetype/subprojects/dlg/LICENSE" in adlar and not any(n.startswith("dlg/") for n in adlar))
@@ -2319,7 +2353,7 @@ def _selftest_icerik(s, kok):
         s.tamam("arşiv: çalıştırılabilir bit ve bağ korunur", uyeler["ffmpeg/bin/arac"].mode == 0o755 and uyeler["ffmpeg/baglanti"].issym() and uyeler["ffmpeg/baglanti"].linkname == "README")
         s.tamam("arşiv: dosya baytları commit nesnesiyle aynı", tar.extractfile("ffmpeg/README").read() == b"kaynak ffmpeg\n")
         kayit = json.loads(tar.extractfile("SOURCES.json").read())
-        s.tamam("arşiv: SOURCES.json ağaç SHA'sı dolu", all(COMMIT_RE.fullmatch(k["tree"]) for k in kayit) and len(kayit) == 14)
+        s.tamam("arşiv: SOURCES.json ağaç SHA'sı dolu", all(COMMIT_RE.fullmatch(k["tree"]) for k in kayit) and len(kayit) == 15)
         dlg_kayit = [k for k in kayit if k["name"] == "dlg"]
         s.tamam("arşiv: SOURCES.json dlg kaydı parent ve path taşır, diğerleri taşımaz",
                 len(dlg_kayit) == 1 and dlg_kayit[0]["parent"] == "freetype" and dlg_kayit[0]["path"] == "subprojects/dlg"

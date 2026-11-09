@@ -119,7 +119,6 @@ ETIKET_RE = re.compile(r"v[0-9]+\.[0-9]+\.[0-9]+-forge\.[0-9]+")
 DENEME_RE = re.compile(r"deneme-[0-9a-f]{7}")
 COMMIT_RE = re.compile(r"[0-9a-f]{40}")
 SHA256_RE = re.compile(r"[0-9a-f]{64}")
-SHA256_RE = re.compile(r"[0-9a-f]{64}")
 URL_RE = re.compile(r"https://github\.com/[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+")
 REF_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]*")
 YOL_KARAKTER_RE = re.compile(r"[\x21-\x5b\x5d-\x7e]+")   # yazdırılabilir ASCII; boşluk, ters bölü ve ASCII dışı yok

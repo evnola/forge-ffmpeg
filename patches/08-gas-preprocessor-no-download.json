@@ -1,0 +1,13 @@
+{
+  "id": "08-gas-preprocessor-no-download",
+  "tree": "ffmpeg-kit-next",
+  "file": "scripts/function-ios.sh",
+  "op": "replace",
+  "anchor": "    DOWNLOAD_RESULT=$(download \"https://github.com/arthenica/gas-preprocessor/raw/v20210917/gas-preprocessor.pl\" \"gas-preprocessor.pl\" \"exit\")\n    if [[ ${DOWNLOAD_RESULT} -ne 0 ]]; then\n      exit 1\n    fi\n    (chmod +x \"${FFMPEG_KIT_TMPDIR}\"/gas-preprocessor.pl 1>>\"${BASEDIR}\"/build.log 2>&1) || return 1\n\n    # patch gas-preprocessor.pl against the following warning\n    # Unescaped left brace in regex is deprecated here (and will be fatal in Perl 5.32), passed through in regex; marked by <-- HERE in m/(?:ld|st)\\d\\s+({ <-- HERE \\s*v(\\d+)\\.(\\d[bhsdBHSD])\\s*-\\s*v(\\d+)\\.(\\d[bhsdBHSD])\\s*})/ at /Users/taner/Projects/ffmpeg-kit/.tmp/gas-preprocessor.pl line 1065.\n    ${SED_INLINE} 's/s+({/s+(\\\\{/g;s/s\\*})/s*\\\\})/g' \"${FFMPEG_KIT_TMPDIR}\"/gas-preprocessor.pl\n",
+  "text": "    echo -e \"\\nERROR: gas-preprocessor.pl was not placed by build.py before ios.sh; the build must not fetch it. Build will now exit.\\n\" 1>>\"${BASEDIR}\"/build.log 2>&1\n    exit 1\n",
+  "project": "FFmpegKitNext (https://github.com/arthenica/ffmpeg-kit-next)",
+  "license": "LGPL-3.0, the license of the project this patch modifies",
+  "date": "2026-11-09",
+  "notice": "Modified by Evnola OU on 2026-11-09: in scripts/function-ios.sh, the branch of set_toolchain_paths that downloads gas-preprocessor.pl, makes it executable and patches it with sed is replaced by a log line and an unconditional exit 1.",
+  "reason": "Next downloads gas-preprocessor.pl from a movable tag URL, without a lock or a checksum, whenever .tmp/gas-preprocessor.pl is missing, and hands it to every arm64 library as AS. build.py places the locked file, with the same sed transformation applied, before ios.sh, so the branch is dead code. If the file is ever missing, the build stops instead of downloading: Next's own error path runs exit 1 inside a command substitution and therefore does not stop the build, and a failed download once let the libraries build without a toolchain."
+}

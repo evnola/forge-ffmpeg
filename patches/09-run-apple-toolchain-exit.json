@@ -1,0 +1,13 @@
+{
+  "id": "09-run-apple-toolchain-exit",
+  "tree": "ffmpeg-kit-next",
+  "file": "scripts/run-apple.sh",
+  "op": "replace",
+  "anchor": "set_toolchain_paths \"${LIB_NAME}\"\n",
+  "text": "set_toolchain_paths \"${LIB_NAME}\" || exit 1\n",
+  "project": "FFmpegKitNext (https://github.com/arthenica/ffmpeg-kit-next)",
+  "license": "LGPL-3.0, the license of the project this patch modifies",
+  "date": "2026-11-09",
+  "notice": "Modified by Evnola OU on 2026-11-09: in scripts/run-apple.sh, the call to set_toolchain_paths now ends the script with exit 1 when it fails.",
+  "reason": "run-apple.sh ignored the return code of set_toolchain_paths. When it returned early, AS, CC, AR and INSTALL_PKG_CONFIG_DIR were never exported and the library was configured with an empty toolchain and an empty pkg-config install directory (the fribidi 'cp: identical' failure of the first runs). The build now stops at the first failure of the toolchain setup."
+}

@@ -1984,6 +1984,69 @@ NEXT_MAIN_IOS_SH = r'''while [ ${#enabled_library_list[@]} -gt $completed ]; do
 '''
 
 
+# Next scripts/function-ios.sh@9f04bf1e satır 371-388 (set_toolchain_paths başı) ve scripts/run-apple.sh@9f04bf1e (tamamı): olduğu gibi,
+# gh api ile ham bayt olarak alındı (CR yok). Yama 08 ve 09 bunlara uygulanır; çapaların tam dosyalarda tam bir kez geçtiği ayrıca ölçüldü.
+NEXT_FUNCTION_IOS_SH = r'''set_toolchain_paths() {
+  # CROSS-COMPILING, SO TOOLS THAT RUN ON THE BUILD MACHINE NEED THEIR OWN
+  # COMPILER
+  set_host_cc "$(command -v clang)"
+
+  if [ ! -f "${FFMPEG_KIT_TMPDIR}/gas-preprocessor.pl" ]; then
+    DOWNLOAD_RESULT=$(download "https://github.com/arthenica/gas-preprocessor/raw/v20210917/gas-preprocessor.pl" "gas-preprocessor.pl" "exit")
+    if [[ ${DOWNLOAD_RESULT} -ne 0 ]]; then
+      exit 1
+    fi
+    (chmod +x "${FFMPEG_KIT_TMPDIR}"/gas-preprocessor.pl 1>>"${BASEDIR}"/build.log 2>&1) || return 1
+
+    # patch gas-preprocessor.pl against the following warning
+    # Unescaped left brace in regex is deprecated here (and will be fatal in Perl 5.32), passed through in regex; marked by <-- HERE in m/(?:ld|st)\d\s+({ <-- HERE \s*v(\d+)\.(\d[bhsdBHSD])\s*-\s*v(\d+)\.(\d[bhsdBHSD])\s*})/ at /Users/taner/Projects/ffmpeg-kit/.tmp/gas-preprocessor.pl line 1065.
+    ${SED_INLINE} 's/s+({/s+(\\{/g;s/s\*})/s*\\})/g' "${FFMPEG_KIT_TMPDIR}"/gas-preprocessor.pl
+  fi
+
+  LOCAL_GAS_PREPROCESSOR="${FFMPEG_KIT_TMPDIR}/gas-preprocessor.pl"
+'''
+NEXT_RUN_APPLE_SH = r'''#!/bin/bash
+
+# ENABLE COMMON FUNCTIONS
+source "${BASEDIR}"/scripts/function-"${FFMPEG_KIT_BUILD_TYPE}".sh || return 1
+
+LIB_NAME=$1
+ENABLED_LIBRARY_PATH="${LIB_INSTALL_BASE}/${LIB_NAME}"
+
+# PREPARE PATHS & DEFINE ${INSTALL_PKG_CONFIG_DIR}
+SCRIPT_PATH="${BASEDIR}/scripts/apple/${LIB_NAME}.sh"
+set_toolchain_paths "${LIB_NAME}"
+
+# SET BUILD FLAGS
+HOST=$(get_host)
+export CFLAGS=$(get_cflags "${LIB_NAME}")
+export CXXFLAGS=$(get_cxxflags "${LIB_NAME}")
+export LDFLAGS=$(get_ldflags "${LIB_NAME}")
+export PKG_CONFIG_LIBDIR="${INSTALL_PKG_CONFIG_DIR}"
+
+echo -e "----------------------------------------------------------------"
+echo -e "\nINFO: Building ${LIB_NAME} for ${HOST} with the following environment variables\n"
+env
+echo -e "----------------------------------------------------------------\n"
+echo -e "INFO: System information\n"
+echo -e "INFO: $(uname -a)\n"
+echo -e "----------------------------------------------------------------\n"
+
+cd "${BASEDIR}"/src/"${LIB_NAME}" || return 1
+
+LIB_INSTALL_PREFIX="${ENABLED_LIBRARY_PATH}"
+BUILD_DIR=$(get_cmake_build_directory)
+CMAKE_SYSTEM_NAME=$(get_apple_cmake_system_name)
+
+# DELETE THE PREVIOUS BUILD OF THE LIBRARY
+rm -rf "${LIB_INSTALL_PREFIX}" || return 1
+rm -rf "${BUILD_DIR}" || return 1
+
+# EXECUTE BUILD SCRIPT OF EACH ENABLED LIBRARY
+source "${SCRIPT_PATH}"
+'''
+
+
 def _yama_agaclari(kok):
     work = os.path.join(kok, "work")
     _yaz(os.path.join(work, "scripts", "apple", "ffmpeg.sh"), NEXT_FFMPEG_SH.encode())
@@ -1993,6 +2056,8 @@ def _yama_agaclari(kok):
     _yaz(os.path.join(work, "src", "freetype", "autogen.sh"), FREETYPE_AUTOGEN_SH.encode())
     _yaz(os.path.join(work, "scripts", "function-apple.sh"), NEXT_FUNCTION_APPLE_SH.encode())
     _yaz(os.path.join(work, "scripts", "main-ios.sh"), NEXT_MAIN_IOS_SH.encode())
+    _yaz(os.path.join(work, "scripts", "function-ios.sh"), NEXT_FUNCTION_IOS_SH.encode())
+    _yaz(os.path.join(work, "scripts", "run-apple.sh"), NEXT_RUN_APPLE_SH.encode())
     return work
 
 
@@ -2549,7 +2614,7 @@ def _selftest_icerik(s, kok):
     gercek_yamalar = os.path.join(HERE, "patches")
     # gerçek yamalar, Next'ten alınmış çapa bölgelerine uygulanır (ffmpeg.sh yaması ağaç adı Next'tir: work kökü)
     rapor = yama_uygula(gw, gercek_yamalar)
-    s.tamam("gerçek yamalar uygulanır (yedi yama tanımı)", len(rapor) == 7)
+    s.tamam("gerçek yamalar uygulanır (dokuz yama tanımı)", len(rapor) == 9)
     with open(os.path.join(gw, "scripts", "apple", "ffmpeg.sh"), "rb") as f:
         sonra = f.read().decode()
     # configure çağrısının belirteçleri: bayraklar POSTFIX'ten önce, bu sırayla
@@ -2592,6 +2657,63 @@ def _selftest_icerik(s, kok):
     s.tamam("main-ios.sh yaması: fontconfig ve gnutls kolları bayt bayt aynı, fontconfig ve harfbuzz hâlâ OK_freetype bekler",
             kol_(mi, "fontconfig") == kol_(NEXT_MAIN_IOS_SH, "fontconfig") and kol_(mi, "gnutls") == kol_(NEXT_MAIN_IOS_SH, "gnutls")
             and "[[ $OK_freetype -eq 1 ]]" in kol_(mi, "fontconfig") and "[[ $OK_freetype -eq 1 ]]" in kol_(mi, "harfbuzz"))
+    # Yama 08/09 (SK-947-5): Next'in gas-preprocessor indirme dalı kapanır, araç zinciri hatası derlemeyi durdurur.
+    with open(os.path.join(gw, "scripts", "function-ios.sh"), "rb") as f:
+        fi_ = f.read().decode()
+    with open(os.path.join(gw, "scripts", "run-apple.sh"), "rb") as f:
+        ra_ = f.read().decode()
+    dal_basi = '  if [ ! -f "${FFMPEG_KIT_TMPDIR}/gas-preprocessor.pl" ]; then\n'
+    dal_sonu = '  fi\n\n  LOCAL_GAS_PREPROCESSOR="${FFMPEG_KIT_TMPDIR}/gas-preprocessor.pl"\n'
+    iz_satiri = 'echo -e "\\nERROR: gas-preprocessor.pl was not placed by build.py before ios.sh; the build must not fetch it. Build will now exit.\\n" 1>>"${BASEDIR}"/build.log 2>&1'
+    s.tamam("function-ios.sh yaması: indirme, curl, chmod ve sed çağrıları kalkar; dalda log satırı ve tek koşulsuz exit 1 var",
+            "download" not in fi_ and "curl" not in fi_ and "chmod" not in fi_ and "SED_INLINE" not in fi_ and "return 1" not in fi_
+            and fi_.count("exit 1") == 1 and fi_.count(iz_satiri) == 1 and fi_.count("DOWNLOAD_RESULT") == 0)
+    s.tamam("function-ios.sh yaması: dal koşulu ve sonrası yerinde, dal içi yalnız log satırı ve exit 1",
+            fi_.startswith(NEXT_FUNCTION_IOS_SH[:NEXT_FUNCTION_IOS_SH.index(dal_basi)])
+            and fi_[fi_.index(dal_basi):] == dal_basi + "    " + iz_satiri + "\n    exit 1\n" + dal_sonu)
+    s.tamam("function-ios.sh yaması: bekçinin aradığı iki indirme satırını (DEBUG: Downloaded / ERROR: Failed to download) üretmez",
+            "DEBUG: Downloaded " not in fi_ and "ERROR: Failed to download" not in fi_ and "not found" not in fi_ and "libbrotlidec" not in fi_)
+    s.tamam("run-apple.sh yaması: set_toolchain_paths çağrısı || exit 1 alır, geri kalanı bayt bayt aynı",
+            ra_ == NEXT_RUN_APPLE_SH.replace('set_toolchain_paths "${LIB_NAME}"\n', 'set_toolchain_paths "${LIB_NAME}" || exit 1\n') and ra_.count("|| exit 1") == 1)
+    if os.name == "posix" and shutil.which("bash"):
+        # Gerçek bash'te: yamalı dal dosya yokken betiği durdurur ve indirmez; dosya varken geçer. Yamasız hâl hatayı yutar (download()
+        # içindeki exit 1 komut ikamesinde kalır, chmod başarısız olur, return 1 ile devam edilir): sınama yamayı gerçekten ayırt eder.
+        bh = os.path.join(kok, "bash-gas")
+        os.makedirs(os.path.join(bh, ".tmp"))
+
+        def gas_bash(fonksiyon, hazir):
+            yer = os.path.join(bh, ".tmp", GAS_DOSYASI)
+            for yol_ in (yer, os.path.join(bh, "build.log"), os.path.join(bh, "indirme.iz")):
+                if os.path.lexists(yol_):
+                    os.remove(yol_)
+            if hazir:
+                _yaz(yer, b"#!/usr/bin/env perl\n")
+            _yaz(os.path.join(bh, "build.log"), b"")
+            kesik = fonksiyon.split("LOCAL_GAS_PREPROCESSOR=")[0] + "  LOCAL_GAS_PREPROCESSOR=x\n}\n"
+            betik = ('BASEDIR="$1"\nFFMPEG_KIT_TMPDIR="$BASEDIR/.tmp"\nset_host_cc() { :; }\n'
+                     'download() { echo indirme >> "$BASEDIR/indirme.iz"; exit 1; }\n' + kesik + "set_toolchain_paths x\necho DEVAM\n")
+            p = subprocess.run(["bash", "-c", betik, "bash", bh], stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=60)
+            with open(os.path.join(bh, "build.log"), "rb") as f:
+                return (p.returncode, b"DEVAM" in p.stdout, f.read().decode(), os.path.lexists(os.path.join(bh, "indirme.iz")))
+
+        yamali_yok = gas_bash(fi_, False)
+        s.tamam("function-ios.sh yaması (bash): dosya yokken exit 1, log satırı yazılır, indirme çağrılmaz, betik devam etmez",
+                yamali_yok[0] == 1 and not yamali_yok[1] and "ERROR: gas-preprocessor.pl was not placed" in yamali_yok[2] and not yamali_yok[3])
+        yamali_var = gas_bash(fi_, True)
+        s.tamam("function-ios.sh yaması (bash): dosya yerindeyken geçer, log satırı yok, indirme çağrılmaz",
+                yamali_var[0] == 0 and yamali_var[1] and "ERROR" not in yamali_var[2] and not yamali_var[3])
+        yamasiz_yok = gas_bash(NEXT_FUNCTION_IOS_SH, False)
+        s.tamam("function-ios.sh yamasız (bash): hatayı yutar ve devam eder (yamanın gerekçesi)", yamasiz_yok[1] and yamasiz_yok[3])
+
+        def ra_kes(metin):
+            bas, _, son = metin.partition("\nset_toolchain_paths")
+            bas = "\n".join(l for l in bas.split("\n") if not l.startswith("source "))
+            return bas + "\nset_toolchain_paths" + son.split("\n")[0] + "\necho DEVAM\n"
+
+        for ad_, metin_, devam_ in (("yamalı", ra_, False), ("yamasız", NEXT_RUN_APPLE_SH, True)):
+            p = subprocess.run(["bash", "-c", "set_toolchain_paths() { return 1; }\nLIB_NAME=x\n" + ra_kes(metin_)], stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=60)
+            s.tamam("run-apple.sh %s (bash): set_toolchain_paths 1 dönerse betik %s" % (ad_, "devam eder" if devam_ else "exit 1 ile durur"),
+                    (b"DEVAM" in p.stdout) == devam_ and (devam_ or p.returncode == 1))
     # Yama 07 libjxl'in kapalı olduğuna dayanır (SK-941-3): freetype açık, libjxl bayrakla kapalı, açan bayrak yok.
     s.tamam("ios.sh seçenekleri: freetype açık, --disable-lib-libjxl tam bir kez, libjxl'i açan bayrak yok",
             "--enable-lib-freetype" in IOS_SECENEKLERI and IOS_SECENEKLERI.count("--disable-lib-libjxl") == 1
@@ -2600,7 +2722,10 @@ def _selftest_icerik(s, kok):
     for ad_, dosya_, parca_, iki_ in (("autogen.sh", ("src", "freetype", "autogen.sh"), FREETYPE_AUTOGEN_SH, "    git submodule update --init\n"),
                                       ("freetype.sh", ("scripts", "apple", "freetype.sh"), NEXT_FREETYPE_SH, "  --with-brotli=yes \\\n"),
                                       ("function-apple.sh", ("scripts", "function-apple.sh"), NEXT_FUNCTION_APPLE_SH, "Requires.private: zlib, libbrotlidec\n"),
-                                      ("main-ios.sh", ("scripts", "main-ios.sh"), NEXT_MAIN_IOS_SH, "      if [[ $OK_libpng -eq 1 ]] && [[ $OK_libjxl -eq 1 ]]; then\n")):
+                                      ("main-ios.sh", ("scripts", "main-ios.sh"), NEXT_MAIN_IOS_SH, "      if [[ $OK_libpng -eq 1 ]] && [[ $OK_libjxl -eq 1 ]]; then\n"),
+                                      ("function-ios.sh", ("scripts", "function-ios.sh"), NEXT_FUNCTION_IOS_SH,
+                                       NEXT_FUNCTION_IOS_SH[NEXT_FUNCTION_IOS_SH.index("    DOWNLOAD_RESULT="):NEXT_FUNCTION_IOS_SH.index("  fi\n\n  LOCAL_GAS")]),
+                                      ("run-apple.sh", ("scripts", "run-apple.sh"), NEXT_RUN_APPLE_SH, 'set_toolchain_paths "${LIB_NAME}"\n')):
         fw_ = _yama_agaclari(os.path.join(kok, "yf-" + ad_))
         _yaz(os.path.join(fw_, *dosya_), (parca_ + iki_).encode())
         s.kirmizi_olmali("%s yaması: çapa iki kez bulunursa uygulanmaz" % ad_, lambda: yama_uygula(fw_, gercek_yamalar), "2 kez")

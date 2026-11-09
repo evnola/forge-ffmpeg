@@ -279,7 +279,9 @@ without network access. What stops or detects this:
   stop the build instead of downloading it (see above).
 - `derle` fails the build, even if `ios.sh` succeeded, when `build.log` contains one of the two lines that Next's `download()`
   writes: `DEBUG: Downloaded ` or `ERROR: Failed to download`. This build is not expected to download anything. (The
-  `clone_git_repository_with_*` functions write other lines; their targets are covered by `verify-lock`.)
+  `clone_git_repository_with_*` functions write other lines; their targets are covered by `verify-lock`.) It also fails
+  when `ios.sh` succeeded but `build.log` is missing or is not a regular file (a link or a directory), because the guard
+  has no other channel and must not pass silently.
 
 Not covered: a download that leaves none of these traces (for example a file fetched into a temporary directory or into
 a path that already exists in the tree).

@@ -950,8 +950,8 @@ def derle(work, env=None, komut=None, sessizlik_siniri=SESSIZLIK_SINIRI, calisti
     sys.stdout.flush()
     rc, asildi, son = calistir(komut, work, env, sessizlik_siniri)
     log = os.path.join(work, "build.log")
-    indirme = indirme_izleri(log) if os.path.isfile(log) else {}
     if rc != 0 or asildi:
+        indirme = indirme_izleri(log) if os.path.isfile(log) else {}
         bekleyen = []
         if os.path.isfile(log):
             sonu = log_sonu(log)
@@ -963,6 +963,14 @@ def derle(work, env=None, komut=None, sessizlik_siniri=SESSIZLIK_SINIRI, calisti
             raise Kirmizi("ios.sh %d sn hiç çıktı vermedi, süreç grubu öldürüldü; son çıktı: %r; build.log sonunda bağımlılığı bekleyen kütüphaneler: %s%s"
                           % (sessizlik_siniri, gizle(son.decode("utf-8", "replace"))[-80:], ", ".join(bekleyen) or "yok", ek))
         raise Kirmizi("ios.sh başarısız (kod %d)%s" % (rc, ek))
+    # İndirme bekçisinin tek kanalı build.log'dur: ios.sh başarılı dönüp günlük yoksa ya da normal dosya değilse (bağ, dizin)
+    # bekçi sessizce geçmez, kırmızı olur. Bağ izlenmez, bu yüzden lstat.
+    try:
+        log_kip = os.lstat(log).st_mode
+    except OSError:
+        log_kip = None
+    kirmizi_if(log_kip is None or not stat.S_ISREG(log_kip), "ios.sh başarılı döndü ama build.log yok ya da normal dosya değil; indirme bekçisi çalışamaz")
+    indirme = indirme_izleri(log)
     kirmizi_if(indirme, indirme_mesaji(indirme))
     return cikti_dizini_bul(work)
 
@@ -3748,10 +3756,11 @@ def _selftest_bekci(s, kok):
     s.tamam("derle: varsayılan sessizlik sınırı SESSIZLIK_SINIRI ve en çok bir saat", derle.__defaults__[2] == SESSIZLIK_SINIRI and 0 < SESSIZLIK_SINIRI <= 3600)
     mesaj, hata, _ = derle_sina('trap "exit 0" TERM\necho basla\nsleep 60 &\nwait\n')
     s.tamam("derle: SIGTERM'e 0 ile çıkan takılı süreç de kırmızı sayılır", "hiç çıktı vermedi" in mesaj)
-    mesaj, hata, sonuc = derle_sina('mkdir -p prebuilt/bundle-apple-xcframework-x\n')
+    mesaj, hata, sonuc = derle_sina(': > build.log\nmkdir -p prebuilt/bundle-apple-xcframework-x\n')
     s.tamam("derle: başarılı ios.sh çıktı dizinini döndürür", mesaj == "" and sonuc is not None and sonuc.endswith("bundle-apple-xcframework-x"))
     # SK-947-6: build.log'da Next'in iki indirme satırından biri varsa ios.sh başarılı olsa bile kırmızı
     tamam_sh = "mkdir -p prebuilt/bundle-apple-xcframework-x\n"
+    gunluk_yok = "build.log yok ya da normal dosya değil"
     for ad, satir in (("başarılı indirme", "DEBUG: Downloaded https://github.com/x/y to /w/.tmp/y"),
                       ("başarısız indirme", "ERROR: Failed to download https://github.com/x/y to /w/.tmp/y, rc=22. ")):
         mesaj, hata, sonuc = derle_sina('printf "\\n%s\\n" >> build.log\n' % satir + tamam_sh)
@@ -3763,8 +3772,15 @@ def _selftest_bekci(s, kok):
     mesaj, hata, sonuc = derle_sina('printf "INFO: gnu config already downloaded. Source folder found at /w\\nDEBUG: Downloading custom library x\\n'
                                     'DEBUG: Download skipped\\nERROR: Failed to clone y\\n" >> build.log\n' + tamam_sh)
     s.tamam("derle: indirmeye benzeyen ama Next'in download() satırı olmayan log satırları kırmızı vermez", mesaj == "" and sonuc is not None)
+    # m-950-1: rc=0 iken build.log yoksa ya da normal dosya değilse bekçi sessizce geçmez
     mesaj, hata, sonuc = derle_sina(tamam_sh)
-    s.tamam("derle: build.log hiç yazılmadıysa da (indirme izi yok) yeşil", mesaj == "" and sonuc is not None)
+    s.tamam("derle: ios.sh başarılı ama build.log hiç yazılmadıysa kırmızı (m-950-1)", gunluk_yok in mesaj and sonuc is None)
+    mesaj, hata, sonuc = derle_sina("mkdir build.log\n" + tamam_sh)
+    s.tamam("derle: ios.sh başarılı ama build.log dizinse kırmızı (m-950-1)", gunluk_yok in mesaj and sonuc is None)
+    mesaj, hata, sonuc = derle_sina("echo x > hedef.log\nln -s hedef.log build.log\n" + tamam_sh)
+    s.tamam("derle: ios.sh başarılı ama build.log sembolik bağsa kırmızı (m-950-1)", gunluk_yok in mesaj and sonuc is None)
+    mesaj, hata, sonuc = derle_sina(": > build.log\n" + tamam_sh)
+    s.tamam("derle: boş ama normal dosya olan build.log yeşil (m-950-1)", mesaj == "" and sonuc is not None)
 
 
 if __name__ == "__main__":

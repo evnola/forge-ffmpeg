@@ -312,6 +312,21 @@ GAS_DONUSUMLERI = ((b"s+({", b"s+(\\{"), (b"s*})", b"s*\\})"))
 # uygulanıp aynı çıktı alındı; runner'da ölçülmedi.
 GAS_SON_SHA256 = "ed085dd43ed95759a2b84afc3b1f9b0b64114b586d0d4b16fbe164b4369ae844"
 
+# .tmp/ üst düzey girdileri: kapalı sabit tablo (SK-951-1); önek ya da joker yok, nokta ile başlayan adlar da sayılır. Değer beklenen türdür.
+# Derleme öncesi yalnız {source, gas-preprocessor.pl}. Derleme sonrası Next'in kendi yazdıkları da eklenir (Next @9f04bf1e kaynağından okundu,
+# runner'da ölçülmedi): cmake (harfbuzz'ın meson kurulumu, function.sh get_cmake_build_directory) ve --xcframework dalının iki bundle dizini
+# (function-ios.sh). mac-catalyst ve düz ios bundle'ı ile ffkitprotocols bu derlemede oluşmaz (--arch iki dilim, --no-ffmpeg-kit-protocols),
+# bu yüzden listede yoktur ve çıkarlarsa kırmızıdır. İçlerine inilmez (SK-951-7): download() yalnız .tmp/ üst düzeyine yazar.
+TUR_DIZIN, TUR_DOSYA = "dizin", "dosya"
+# Bundle adlarındaki sürüm Next'in IOS_MIN_VERSION'ıdır (--target=); ayrı bir sabit yoktur (SK-951-4). Tam bir --target= yoksa yükleme patlar.
+(IOS_HEDEF_SURUMU,) = [a.split("=", 1)[1] for a in IOS_SECENEKLERI if a.startswith("--target=")]
+TMP_UST_ONCE = {"source": TUR_DIZIN, GAS_DOSYASI: TUR_DOSYA}
+TMP_UST_SONRA = dict(TMP_UST_ONCE, **{
+    "cmake": TUR_DIZIN,
+    "bundle-apple-universal-iphoneos-" + IOS_HEDEF_SURUMU: TUR_DIZIN,
+    "bundle-apple-universal-iphonesimulator-" + IOS_HEDEF_SURUMU: TUR_DIZIN,
+})
+
 
 def gas_donustur(veri):
     for eski, _ in GAS_DONUSUMLERI:
@@ -370,6 +385,48 @@ def gas_dosyasi_sorunlari(work):
         return sorun + [".tmp/%s okunamadı" % GAS_DOSYASI]
     if hashlib.sha256(veri).hexdigest() != GAS_SON_SHA256:
         sorun.append(".tmp/%s baytları yerleştirilen değil (sha256 %s)" % (GAS_DOSYASI, hashlib.sha256(veri).hexdigest()[:12]))
+    return sorun
+
+
+def tur_adi(yol):
+    """lstat türü (bağ izlenmez): dizin / dosya / bağ / diğer / okunamadı. Ad ASCII kaçışlı yazılır (günlük satırı enjeksiyonu olmasın)."""
+    try:
+        kip = os.lstat(yol).st_mode
+    except OSError:
+        return "okunamadı"
+    if stat.S_ISLNK(kip):
+        return "bağ"
+    if stat.S_ISDIR(kip):
+        return TUR_DIZIN
+    if stat.S_ISREG(kip):
+        return TUR_DOSYA
+    return "diğer"
+
+
+def tmp_ust_sorunlari(work, asama):
+    """work/.tmp gerçek dizin mi ve üst düzey girdileri TMP_UST_ONCE / TMP_UST_SONRA kümesine TAM eşit mi (fazla da eksik de kırmızı)? Türler lstat ile;
+    gas-preprocessor.pl'in kendisini gas_dosyasi_sorunlari denetler."""
+    tmp = os.path.join(work, ".tmp")
+    tur = tur_adi(tmp)
+    if tur == "okunamadı":
+        return [".tmp yok"]
+    if tur != TUR_DIZIN:
+        return [".tmp gerçek dizin değil (%s)" % tur]
+    beklenen = TMP_UST_ONCE if asama == "once" else TMP_UST_SONRA
+    try:
+        mevcut = os.listdir(tmp)
+    except OSError:
+        return [".tmp listelenemedi"]
+    sorun = []
+    for ad in sorted(set(mevcut) - set(beklenen)):
+        sorun.append(".tmp/%s kilitte yok (%s)" % (ascii(ad)[1:-1], tur_adi(os.path.join(tmp, ad))))
+    for ad in sorted(beklenen):
+        if ad == GAS_DOSYASI:
+            continue
+        if ad not in mevcut:
+            sorun.append(".tmp/%s eksik (%s olmalı)" % (ad, beklenen[ad]))
+        elif tur_adi(os.path.join(tmp, ad)) != beklenen[ad]:
+            sorun.append(".tmp/%s gerçek %s değil (%s)" % (ad, beklenen[ad], tur_adi(os.path.join(tmp, ad))))
     return sorun
 
 
@@ -473,7 +530,7 @@ def kilit_dogrula(work, kilit, asama, dosya_izni=False):
     """İki yönlü kilit denetimi. asama "once": (a)(b)(c)(d); "sonra": (a)(b)(d) (Next ve yamalarımız ağaçları kirletir).
     Her iki aşamada ayrıca gitlink/.gitmodules istisna tablosu (altmodul_sorunlari) ve ağaç içi indirme denetimi (agac_ici_sorunlari) koşar.
     İç içe kaynak (dlg) için "sonra" kipinde de HEAD kilide eşit ve durum boş olmalıdır.
-    İki kipte de (e) .tmp/gas-preprocessor.pl baytları; yalnız "once" kipinde (f) .tmp/ üst düzey kümesi denetlenir."""
+    İki kipte de (e) .tmp/gas-preprocessor.pl baytları ve (f) .tmp/ üst düzey kümesi (kipe göre farklı tam küme) denetlenir."""
     kirmizi_if(asama not in ("once", "sonra"), "asama once ya da sonra olmalı")
     sorunlar = []
     ic_kilit = dict((k["name"], k["commit"]) for k in kilit["sources"] if k["name"] in IC_KAYNAKLAR)
@@ -508,11 +565,8 @@ def kilit_dogrula(work, kilit, asama, dosya_izni=False):
                 sorunlar.append("%s/%s kilitte yok" % (os.path.relpath(ust, work).replace(os.sep, "/"), girdi))
     # (e) gas-preprocessor.pl iki kipte de yerleştirildiği baytlarla aynı olmalı (Next onu AS olarak çalıştırır).
     sorunlar += gas_dosyasi_sorunlari(work)
-    # (f) .tmp/ üst düzeyi: derleme başlamadan yalnız {source, gas-preprocessor.pl}. Next'in derleme sırasında yazdığı çıktılar
-    # (.tmp/cmake, .tmp/bundle-apple-universal-*) `sonra` kipinde meşrudur; o kipin üst düzey kümesi security kararını bekliyor (#948).
-    if asama == "once" and os.path.isdir(os.path.join(work, ".tmp")):
-        for girdi in sorted(set(os.listdir(os.path.join(work, ".tmp"))) - set(["source", GAS_DOSYASI])):
-            sorunlar.append(".tmp/%s kilitte yok" % girdi)
+    # (f) .tmp/ üst düzeyi iki kipte de kapalı kümeye tam eşit ve türleri lstat ile doğru (TMP_UST_ONCE / TMP_UST_SONRA, SK-951-1…3).
+    sorunlar += tmp_ust_sorunlari(work, asama)
     if sorunlar:
         raise Kirmizi("kilit denetimi (%s) başarısız:\n  - %s" % (asama, "\n  - ".join(sorunlar[:30])))
     print("verify-lock (%s): %d kaynak kilitle aynı, kilitte olmayan dizin yok" % (asama, len(kilit["sources"])))
@@ -957,7 +1011,7 @@ def _tani_yaz(hedef, veri):
 
 
 def tani_topla(work, out):
-    """work'teki build.log (baş+son), kütüphane günlükleri, FFmpeg derlenmiş küme listeleri ve yapılandırma dosyaları (TANI_FFMPEG_DOSYALARI) ve prebuilt dizin listesi
+    """work'teki build.log (baş+son), kütüphane günlükleri, FFmpeg derlenmiş küme listeleri ve yapılandırma dosyaları (TANI_FFMPEG_DOSYALARI) ve prebuilt ile .tmp/ üst düzey listeleri
     out'a (yeni dizin) gizlenerek ve sınırlı kopyalanır."""
     if not os.path.isdir(work):
         print("tani: çalışma dizini yok, toplanacak bir şey yok")
@@ -1014,6 +1068,17 @@ def tani_topla(work, out):
         for d in sorted(os.listdir(prebuilt)):
             if os.path.isdir(os.path.join(prebuilt, d)) and not os.path.islink(os.path.join(prebuilt, d)):
                 satirlar += ["prebuilt/%s/%s" % (d, e) for e in sorted(os.listdir(os.path.join(prebuilt, d)))]
+    # .tmp/ üst düzeyi (yalnız ad + lstat türü; içerik ve boyut yok, alt dizinlere inilmez): verify-lock hükmünden bağımsız toplanır, böylece
+    # TMP_UST_SONRA tablosu yanlışsa derleme yeniden koşmadan artifact'tan görülür (SK-951-6).
+    tmp_yol = os.path.join(work, ".tmp")
+    tmp_tur = tur_adi(tmp_yol)
+    tmp_satirlar = [".tmp: %s" % ("yok" if tmp_tur == "okunamadı" else "dizin değil (%s)" % tmp_tur)]
+    if tmp_tur == TUR_DIZIN:
+        try:
+            tmp_satirlar = ["%s\t%s" % (tur_adi(os.path.join(tmp_yol, ad)), ascii(ad)[1:-1]) for ad in sorted(os.listdir(tmp_yol))]
+        except OSError:
+            tmp_satirlar = [".tmp: listelenemedi"]
+    _tani_yaz(os.path.join(out, "tmp-liste.txt"), ("\n".join(tmp_satirlar) + "\n").encode("utf-8"))
     _tani_yaz(os.path.join(out, "prebuilt-liste.txt"), ("\n".join(satirlar) + "\n").encode("utf-8"))
     _tani_yaz(os.path.join(out, "indeks.txt"), ("\n".join(indeks) + "\n").encode("utf-8"))
     print("tani: %d dosya, %d bayt yazıldı: %s" % (len(indeks), toplam, out))
@@ -1765,6 +1830,162 @@ def _yaz(yol, veri):
         f.write(veri)
 
 
+def _bag_sil(yol):
+    try:
+        os.remove(yol)
+    except OSError:
+        os.rmdir(yol)       # Windows'ta dizin bağı rmdir ile silinir
+
+
+def _sonra_dogrula(work, kilit):
+    """Selftest: Next'in derleme sırasında .tmp/'ye bıraktığı dizinleri (yoksa) ekleyip `sonra` kipini koşar, eklediklerini geri alır;
+    sahte derleme çıktısı olmayan çalışma ağaçlarında eski `sonra` sınamaları kendi nedenleriyle kırmızı/yeşil kalsın diye."""
+    eklenen = []
+    try:
+        for ad, tur in TMP_UST_SONRA.items():
+            yol = os.path.join(work, ".tmp", ad)
+            if tur == TUR_DIZIN and not os.path.lexists(yol):
+                os.makedirs(yol)
+                eklenen.append(yol)
+        kilit_dogrula(work, kilit, "sonra", True)
+    finally:
+        for yol in eklenen:
+            shutil.rmtree(yol, ignore_errors=True)
+
+
+def _selftest_tmp_kumesi(s, kok, work, kilit):
+    """.tmp/ üst düzey kümesi ve türleri (SK-951-1…3, 5, 6). work: fetch edilmiş, gas dosyası yerinde, .tmp/ içinde yalnız source ve gas var."""
+    tmp = os.path.join(work, ".tmp")
+    sonra_adlari = [a for a in TMP_UST_SONRA if a not in TMP_UST_ONCE]
+    s.tamam("TMP_UST_ONCE: elle yazılmış tam küme {source, gas-preprocessor.pl}", sorted(TMP_UST_ONCE) == ["gas-preprocessor.pl", "source"])
+    s.tamam("TMP_UST_SONRA: elle yazılmış tam beş ad (sürüm 16.1)",
+            sorted(TMP_UST_SONRA) == sorted(["source", "gas-preprocessor.pl", "cmake", "bundle-apple-universal-iphoneos-16.1", "bundle-apple-universal-iphonesimulator-16.1"]))
+    s.tamam("bundle adlarındaki sürüm IOS_SECENEKLERI'ndeki --target= değerinden türer",
+            IOS_HEDEF_SURUMU == "16.1" and ["--target=" + IOS_HEDEF_SURUMU] == [a for a in IOS_SECENEKLERI if a.startswith("--target=")]
+            and all(a.endswith("-" + IOS_HEDEF_SURUMU) for a in sonra_adlari if a.startswith("bundle-")))
+    s.tamam("TMP_UST türleri: gas dosya, diğerleri dizin", TMP_UST_SONRA[GAS_DOSYASI] == TUR_DOSYA and all(t == TUR_DIZIN for a, t in TMP_UST_SONRA.items() if a != GAS_DOSYASI))
+    bag_hedef = os.path.join(kok, "tmp-bag-hedef")
+    os.makedirs(bag_hedef, exist_ok=True)
+
+    def baglan(yol):
+        try:
+            os.symlink(bag_hedef, yol, target_is_directory=True)
+            return True
+        except (OSError, NotImplementedError):
+            return False            # Windows'ta ayrıcalık yoksa bağ kurulamaz; POSIX koşularında bu sınamalar çalışır
+
+    def kur(*adlar):
+        for ad in adlar:
+            os.makedirs(os.path.join(tmp, ad))
+
+    def kaldir(*adlar):
+        for ad in adlar:
+            yol = os.path.join(tmp, ad)
+            if os.path.islink(yol):
+                _bag_sil(yol)
+            elif os.path.isfile(yol):
+                os.remove(yol)
+            elif os.path.isdir(yol):
+                shutil.rmtree(yol)
+
+    def iki_kip(ad, parca):
+        for asama in ("once", "sonra"):
+            s.kirmizi_olmali("%s (%s)" % (ad, asama), lambda: kilit_dogrula(work, kilit, asama, True), parca)
+
+    # tam küme yeşil: derleme öncesi {source, gas}; derleme sonrası bu ikisi ve üç Next çıktısı
+    kilit_dogrula(work, kilit, "once", True)
+    kur(*sonra_adlari)
+    kilit_dogrula(work, kilit, "sonra", True)
+    s.tamam("tmp kümesi: once tam iki girdiyle, sonra tam beş girdiyle yeşil", True)
+    # fazladan girdi: sonra'da ve once'ta kırmızı; ileti adı ve türü yazar
+    sonra_fazla = [("fazla dizin", "fazla-cikti", TUR_DIZIN), ("ffkitprotocols dizini (--no-ffmpeg-kit-protocols varken oluşmaz)", "ffkitprotocols", TUR_DIZIN),
+                   ("mac-catalyst bundle'ı (--arch iki dilim)", "bundle-apple-universal-mac-catalyst-" + IOS_HEDEF_SURUMU, TUR_DIZIN),
+                   ("düz ios bundle'ı (--xcframework olmayan dal)", "bundle-apple-universal-ios-" + IOS_HEDEF_SURUMU, TUR_DIZIN),
+                   ("başka sürümlü bundle (önek/joker eşleşmesi yok)", "bundle-apple-universal-iphoneos-9.9", TUR_DIZIN),
+                   ("nokta ile başlayan dosya", ".gizli", TUR_DOSYA)]
+    for ad, girdi, tur in sonra_fazla:
+        yol = os.path.join(tmp, girdi)
+        if tur == TUR_DIZIN:
+            os.makedirs(yol)
+        else:
+            _yaz(yol, b"x")
+        s.kirmizi_olmali("sonra: fazladan girdi: %s" % ad, lambda: kilit_dogrula(work, kilit, "sonra", True), ".tmp/%s kilitte yok (%s)" % (girdi, tur))
+        kaldir(girdi)
+    if baglan(os.path.join(tmp, "fazla-bag")):
+        s.kirmizi_olmali("sonra: fazladan girdi: bağ (türü bağ yazılır)", lambda: kilit_dogrula(work, kilit, "sonra", True), ".tmp/fazla-bag kilitte yok (bağ)")
+        kaldir("fazla-bag")
+    kilit_dogrula(work, kilit, "sonra", True)
+    # Next çıktıları derleme öncesi kümede yok: once kipinde her biri fazla girdidir
+    kaldir(*sonra_adlari)
+    for girdi in sonra_adlari:
+        kur(girdi)
+        s.kirmizi_olmali("once: derleme sonrası girdi derleme öncesi kümede yok: %s" % girdi, lambda: kilit_dogrula(work, kilit, "once", True), ".tmp/%s kilitte yok (dizin)" % girdi)
+        kaldir(girdi)
+    kilit_dogrula(work, kilit, "once", True)
+    kur(*sonra_adlari)
+    # tür: dosya ya da bağ, dizin olması gereken girdilerde kırmızı
+    for girdi in sonra_adlari:
+        yol = os.path.join(tmp, girdi)
+        kaldir(girdi)
+        _yaz(yol, b"x")
+        s.kirmizi_olmali("sonra: %s dosya" % girdi, lambda: kilit_dogrula(work, kilit, "sonra", True), ".tmp/%s gerçek dizin değil (dosya)" % girdi)
+        kaldir(girdi)
+        if baglan(yol):
+            s.kirmizi_olmali("sonra: %s bağ (hedef gerçek bir dizin olsa da)" % girdi, lambda: kilit_dogrula(work, kilit, "sonra", True), ".tmp/%s gerçek dizin değil (bağ)" % girdi)
+            kaldir(girdi)
+        s.kirmizi_olmali("sonra: %s eksik" % girdi, lambda: kilit_dogrula(work, kilit, "sonra", True), ".tmp/%s eksik (dizin olmalı)" % girdi)
+        kur(girdi)
+    kilit_dogrula(work, kilit, "sonra", True)
+    # source dizini iki kipte gerçek dizin olmalı (bağ ya da dosya kırmızı)
+    kaldir(*sonra_adlari)
+    kaynak_yedek = os.path.join(kok, "tmp-source-yedek")
+    os.rename(os.path.join(tmp, "source"), kaynak_yedek)
+    try:
+        _yaz(os.path.join(tmp, "source"), b"x")
+        iki_kip("tmp kümesi: source dosya", ".tmp/source gerçek dizin değil (dosya)")
+        os.remove(os.path.join(tmp, "source"))
+        if baglan(os.path.join(tmp, "source")):
+            iki_kip("tmp kümesi: source bağ", ".tmp/source gerçek dizin değil (bağ)")
+            _bag_sil(os.path.join(tmp, "source"))
+        iki_kip("tmp kümesi: source eksik", ".tmp/source eksik (dizin olmalı)")
+    finally:
+        os.rename(kaynak_yedek, os.path.join(tmp, "source"))
+    kilit_dogrula(work, kilit, "once", True)
+    # .tmp kendisi: yok, dosya, bağ (hedefi dolu bir dizin olsa da); iki kipte kırmızı (isdir korumalı atlama yok, SK-951-3)
+    tmp_yedek = os.path.join(kok, "tmp-yedek")
+    os.rename(tmp, tmp_yedek)
+    try:
+        iki_kip("tmp kümesi: .tmp yok", ".tmp yok")
+        _yaz(tmp, b"x")
+        iki_kip("tmp kümesi: .tmp dosya", ".tmp gerçek dizin değil (dosya)")
+        os.remove(tmp)
+        try:
+            os.symlink(tmp_yedek, tmp, target_is_directory=True)
+            baglandi = True
+        except (OSError, NotImplementedError):
+            baglandi = False
+        if baglandi:
+            iki_kip("tmp kümesi: .tmp bir dizine bağ", ".tmp gerçek dizin değil (bağ)")
+            _bag_sil(tmp)
+    finally:
+        os.rename(tmp_yedek, tmp)
+    kilit_dogrula(work, kilit, "once", True)
+    s.tamam("tmp kümesi: sınamalardan sonra durum geri yüklendi (once yeşil)", sorted(os.listdir(tmp)) == ["gas-preprocessor.pl", "source"])
+    # ileti ve ad kaçışı: satır sonu içeren ad günlüğe ham yazılmaz
+    kaza = "a\nb"
+    try:
+        _yaz(os.path.join(tmp, kaza), b"x")
+    except OSError:
+        kaza = None
+    if kaza is not None:
+        try:
+            kilit_dogrula(work, kilit, "once", True)
+            s.tamam("tmp kümesi: satır sonlu ad kırmızı", False)
+        except Kirmizi as e:
+            s.tamam("tmp kümesi: satır sonlu ad kaçışlı yazılır (ham satır sonu yok)", "a\\nb" in str(e) and "a\nb" not in str(e))
+        kaldir(kaza)
+
+
 def _git_deposu(yol, dosyalar, etiket=None):
     """Sahte kaynak: git plumbing ile (dosya sistemi kipi gerekmeden) tek commit. dosyalar: {yol: (bayt, kip)}. commit SHA döner."""
     os.makedirs(yol)
@@ -2293,7 +2514,7 @@ def _selftest_icerik(s, kok):
     work = os.path.join(kok, "w1")
     fetch(work, sahte, dosya_izni=True)
     kilit_dogrula(work, sahte, "once", True)
-    kilit_dogrula(work, sahte, "sonra", True)
+    _sonra_dogrula(work, sahte)
     s.tamam("fetch + verify-lock olumlu", True)
     s.kirmizi_olmali("fetch: çalışma dizini var", lambda: fetch(work, sahte, True), "zaten var")
     s.tamam("fetch: Next kökte, bileşen src/ altında, gnu-config .tmp/source/config",
@@ -2303,22 +2524,22 @@ def _selftest_icerik(s, kok):
     # derleme sonrası kirlenme: "sonra" geçer, "once" temiz değil der
     _yaz(os.path.join(work, "src", "ffmpeg", "README"), b"degisti\n")
     _yaz(os.path.join(work, "yeni_dosya"), b"x")
-    kilit_dogrula(work, sahte, "sonra", True)
+    _sonra_dogrula(work, sahte)
     s.kirmizi_olmali("verify-lock once: kirli ağaç", lambda: kilit_dogrula(work, sahte, "once", True), "temiz değil")
     # kilitte olmayan dizinler
     os.makedirs(os.path.join(work, "src", "rapidjson"))
-    s.kirmizi_olmali("verify-lock sonra: src/ içinde kilitte olmayan dizin", lambda: kilit_dogrula(work, sahte, "sonra", True), "kilitte yok")
+    s.kirmizi_olmali("verify-lock sonra: src/ içinde kilitte olmayan dizin", lambda: _sonra_dogrula(work, sahte), "kilitte yok")
     shutil.rmtree(os.path.join(work, "src", "rapidjson"))
     os.makedirs(os.path.join(work, ".tmp", "source", "rapidjson"))
-    s.kirmizi_olmali("verify-lock sonra: .tmp/source içinde kilitte olmayan dizin", lambda: kilit_dogrula(work, sahte, "sonra", True), "kilitte yok")
+    s.kirmizi_olmali("verify-lock sonra: .tmp/source içinde kilitte olmayan dizin", lambda: _sonra_dogrula(work, sahte), "kilitte yok")
     shutil.rmtree(os.path.join(work, ".tmp", "source", "rapidjson"))
     # HEAD kayması
     yol = os.path.join(work, "src", "libvpx")
     git_ok(["-c", "user.name=s", "-c", "user.email=s@s", "commit", "-q", "--allow-empty", "-m", "kayma"], yol)
-    s.kirmizi_olmali("verify-lock sonra: HEAD kayması", lambda: kilit_dogrula(work, sahte, "sonra", True), "HEAD")
+    s.kirmizi_olmali("verify-lock sonra: HEAD kayması", lambda: _sonra_dogrula(work, sahte), "HEAD")
     s.kirmizi_olmali("verify-lock once: HEAD kayması", lambda: kilit_dogrula(work, sahte, "once", True), "HEAD")
     _sil(os.path.join(work, "src", "libass"))
-    s.kirmizi_olmali("verify-lock: ağaç eksik", lambda: kilit_dogrula(work, sahte, "sonra", True), "yok")
+    s.kirmizi_olmali("verify-lock: ağaç eksik", lambda: _sonra_dogrula(work, sahte), "yok")
     # --- gas-preprocessor.pl: kilitli blob, dönüşüm, ios.sh'tan önce yerleştirme, iki kipte bayt denetimi (SK-947-1…4) ---
     gercek_satir = rb'            if ($line =~ /(?:ld|st)\d\s+({\s*v(\d+)\.(\d[bhsdBHSD])\s*-\s*v(\d+)\.(\d[bhsdBHSD])\s*})/) {' + b"\n"
     beklenen_satir = rb'            if ($line =~ /(?:ld|st)\d\s+(\{\s*v(\d+)\.(\d[bhsdBHSD])\s*-\s*v(\d+)\.(\d[bhsdBHSD])\s*\})/) {' + b"\n"
@@ -2336,31 +2557,31 @@ def _selftest_icerik(s, kok):
     s.tamam("gas: yerleştirilen dosya normal dosya, bağ değil, POSIX'te 0755",
             stat.S_ISREG(os.lstat(gas_hedef).st_mode) and (os.name != "posix" or stat.S_IMODE(os.lstat(gas_hedef).st_mode) == 0o755))
     kilit_dogrula(wg, sahte, "once", True)
-    kilit_dogrula(wg, sahte, "sonra", True)
+    _sonra_dogrula(wg, sahte)
     s.tamam("gas: verify-lock once ve sonra yerleştirme sonrası yeşil", True)
     s.kirmizi_olmali("gas: yerleştirme var olan yolu ezmez", lambda: gas_yerlestir(wg, sahte), "zaten var")
     gas_yedek = yerlesen
     for ad, bozuk_bayt in (("bir bayt değişti", yerlesen[:-1] + b"X"), ("dönüşümsüz kilitli blob", GAS_SAHTE), ("boş", b"")):
         _yaz(gas_hedef, bozuk_bayt)
         s.kirmizi_olmali("gas: verify-lock once, yerleştirilen dosya %s" % ad, lambda: kilit_dogrula(wg, sahte, "once", True), "baytları")
-        s.kirmizi_olmali("gas: verify-lock sonra, yerleştirilen dosya %s (Next ya da derleme değiştirmiş)" % ad, lambda: kilit_dogrula(wg, sahte, "sonra", True), "baytları")
+        s.kirmizi_olmali("gas: verify-lock sonra, yerleştirilen dosya %s (Next ya da derleme değiştirmiş)" % ad, lambda: _sonra_dogrula(wg, sahte), "baytları")
     os.remove(gas_hedef)
     s.kirmizi_olmali("gas: verify-lock once, dosya yok", lambda: kilit_dogrula(wg, sahte, "once", True), "yok")
-    s.kirmizi_olmali("gas: verify-lock sonra, dosya yok", lambda: kilit_dogrula(wg, sahte, "sonra", True), "yok")
+    s.kirmizi_olmali("gas: verify-lock sonra, dosya yok", lambda: _sonra_dogrula(wg, sahte), "yok")
     try:
         os.symlink(os.path.join(wg, ".tmp", "source", GAS_ADI, GAS_DOSYASI), gas_hedef)
         baglanabildi = True
     except (OSError, NotImplementedError):
         baglanabildi = False       # Windows'ta ayrıcalık yoksa bağ kurulamaz; POSIX koşularında bu sınama çalışır
     if baglanabildi:
-        s.kirmizi_olmali("gas: yerleştirilen yol bağ ise verify-lock kırmızı", lambda: kilit_dogrula(wg, sahte, "sonra", True), "normal dosya değil")
+        s.kirmizi_olmali("gas: yerleştirilen yol bağ ise verify-lock kırmızı", lambda: _sonra_dogrula(wg, sahte), "normal dosya değil")
         os.remove(gas_hedef)
     _yaz(gas_hedef, gas_yedek)
     os.chmod(gas_hedef, 0o755)
-    kilit_dogrula(wg, sahte, "sonra", True)
+    _sonra_dogrula(wg, sahte)
     if os.name == "posix":
         os.chmod(gas_hedef, 0o644)
-        s.kirmizi_olmali("gas: yerleştirilen dosya 0755 değilse verify-lock kırmızı", lambda: kilit_dogrula(wg, sahte, "sonra", True), "0755")
+        s.kirmizi_olmali("gas: yerleştirilen dosya 0755 değilse verify-lock kırmızı", lambda: _sonra_dogrula(wg, sahte), "0755")
         os.chmod(gas_hedef, 0o755)
     # .tmp/ üst düzey kümesi: derleme öncesi tam {source, gas-preprocessor.pl}
     _yaz(os.path.join(wg, ".tmp", "indirilen.bin"), b"x")
@@ -2370,10 +2591,7 @@ def _selftest_icerik(s, kok):
     s.kirmizi_olmali("gas: verify-lock once, .tmp/ altında fazladan dizin", lambda: kilit_dogrula(wg, sahte, "once", True), ".tmp/fazla-dizin kilitte yok")
     os.rmdir(os.path.join(wg, ".tmp", "fazla-dizin"))
     kilit_dogrula(wg, sahte, "once", True)
-    # Next derlemesinin .tmp/cmake ve .tmp/bundle-apple-universal-* çıktıları `sonra` kipinde şimdilik kırmızı değil; kararı security verecek (#948).
-    os.makedirs(os.path.join(wg, ".tmp", "cmake", "build"))
-    kilit_dogrula(wg, sahte, "sonra", True)
-    shutil.rmtree(os.path.join(wg, ".tmp", "cmake"))
+    _selftest_tmp_kumesi(s, kok, wg, sahte)
     # kilit/commit tarafı: yanlış baytlı betik, eksik dosya, dönüşüm parçası eksik, dönüşüm sonrası beklenen sabit tutmuyor
     yanlis_gas = _sahte_kilit(os.path.join(kok, "kg1"), {GAS_ADI: {GAS_DOSYASI: (GAS_SAHTE + b"# fazla\n", "100755")}})
     s.kirmizi_olmali("gas: kilitteki sha256 ile commit'teki blob uyuşmazsa fetch kırmızı", lambda: fetch(os.path.join(kok, "wg2"), yanlis_gas, True), "lock.json'daki değil")
@@ -2500,7 +2718,7 @@ def _selftest_icerik(s, kok):
             and git_metin(["ls-tree", "HEAD", "subprojects/dlg"], ft_yol).split()[2] == dlg_kilit)
     s.tamam("(21) once: freetype git status --porcelain boş (sahte kilit değil, gerçek iç içe depo)", git_metin(["status", "--porcelain"], ft_yol) == "")
     kilit_dogrula(w10, sahte, "once", True)
-    kilit_dogrula(w10, sahte, "sonra", True)
+    _sonra_dogrula(w10, sahte)
     s.tamam("(1)(2) fetch + once + sonra: opus boş .gitmodules, freetype İ1 ve .gitmodules ile geçer", True)
     s.tamam("dlg ağacı üst düzey src/ altında ayrı dizin açmaz", not os.path.exists(os.path.join(w10, "src", "dlg")))
     ters = dict(sahte, sources=[x for x in sahte["sources"] if x["name"] == "dlg"] + [x for x in sahte["sources"] if x["name"] != "dlg"])
@@ -2517,14 +2735,14 @@ def _selftest_icerik(s, kok):
     os.rmdir(os.path.join(w10, "src", "dlg"))
     # (18) sonra: dlg'de değişmiş dosya, sonra dlg HEAD kayması; (23) once: iç içe HEAD gitlink'ten farklı => freetype durumu boş değil
     _yaz(os.path.join(dlg_yol, "README"), b"degisti\n")
-    s.kirmizi_olmali("(18) sonra: dlg'de değişmiş dosya", lambda: kilit_dogrula(w10, sahte, "sonra", True), "dlg: ağaç temiz değil")
+    s.kirmizi_olmali("(18) sonra: dlg'de değişmiş dosya", lambda: _sonra_dogrula(w10, sahte), "dlg: ağaç temiz değil")
     git_ok(["checkout", "-q", "--", "README"], dlg_yol)
     _yaz(os.path.join(dlg_yol, "yeni_dosya"), b"x\n")
-    s.kirmizi_olmali("(18) sonra: dlg'de izlenmeyen dosya", lambda: kilit_dogrula(w10, sahte, "sonra", True), "dlg: ağaç temiz değil")
+    s.kirmizi_olmali("(18) sonra: dlg'de izlenmeyen dosya", lambda: _sonra_dogrula(w10, sahte), "dlg: ağaç temiz değil")
     os.remove(os.path.join(dlg_yol, "yeni_dosya"))
-    kilit_dogrula(w10, sahte, "sonra", True)
+    _sonra_dogrula(w10, sahte)
     git_ok(["-c", "user.name=s", "-c", "user.email=s@s", "commit", "-q", "--allow-empty", "-m", "kayma"], dlg_yol)
-    s.kirmizi_olmali("(18) sonra: dlg HEAD kayması", lambda: kilit_dogrula(w10, sahte, "sonra", True), "dlg: HEAD kilitteki commit değil")
+    s.kirmizi_olmali("(18) sonra: dlg HEAD kayması", lambda: _sonra_dogrula(w10, sahte), "dlg: HEAD kilitteki commit değil")
     s.kirmizi_olmali("(23) once: iç içe HEAD gitlink SHA'sından farklı, freetype durumu boş değil", lambda: kilit_dogrula(w10, sahte, "once", True), "freetype: ağaç temiz değil")
     git_ok(["reset", "-q", "--hard", dlg_kilit], dlg_yol)
     kilit_dogrula(w10, sahte, "once", True)
@@ -2555,7 +2773,7 @@ def _selftest_icerik(s, kok):
         s.tamam("(12) sembolik bağın hedefinde git init koşmadı", os.listdir(bos_dizin) == [])
     # (11) lock'ta dlg olmadan fetch: freetype'ın gitlink'i serbest değil (kilit_dogrula çalışma ağacından önce commit ağacına bakar)
     bosluk_kilit = dict(sahte, sources=[x for x in sahte["sources"] if x["name"] != "dlg"])
-    s.kirmizi_olmali("(11) lock'ta dlg yok: İ1 gitlink'i serbest değil (sonra)", lambda: kilit_dogrula(w10, bosluk_kilit, "sonra", True), "gitlink (alt modül) var")
+    s.kirmizi_olmali("(11) lock'ta dlg yok: İ1 gitlink'i serbest değil (sonra)", lambda: _sonra_dogrula(w10, bosluk_kilit), "gitlink (alt modül) var")
 
     # --- ağaç içi indirme denetimi (M2): kilitli ağaçların içine derleme sırasında inen kaynaklar ---
     w7 = os.path.join(kok, "w7")
@@ -2571,7 +2789,7 @@ def _selftest_icerik(s, kok):
 
     def temiz_mi(w, kilit):
         try:
-            kilit_dogrula(w, kilit, "sonra", True)
+            _sonra_dogrula(w, kilit)
             return True
         except Kirmizi:
             return False
@@ -2620,7 +2838,7 @@ def _selftest_icerik(s, kok):
     gl = _sahte_kilit(os.path.join(kok, "k7"), {"freetype": {"subprojects/dlg": ("a" * 40, "160000")}})
     w9 = os.path.join(kok, "w9")
     fetch(w9, gl, True)
-    s.kirmizi_olmali("(5) gitlink SHA'sı kilitteki dlg commit'inden farklı", lambda: kilit_dogrula(w9, gl, "sonra", True), "gitlink (alt modül) var")
+    s.kirmizi_olmali("(5) gitlink SHA'sı kilitteki dlg commit'inden farklı", lambda: _sonra_dogrula(w9, gl), "gitlink (alt modül) var")
     s.kirmizi_olmali("(14) arşiv: İ1'e uymayan gitlink", lambda: arsiv_yaz(w9, gl, "deneme-abc1234", os.path.join(kok, "arsiv-gl"), [("build.py", os.path.join(HERE, "build.py"))]),
                      "blob olmayan girdi")
 
@@ -3324,12 +3542,16 @@ def _selftest_tani(s, kok):
     _yaz(os.path.join(ffm, "libavformat", "demuxer_list.c.bak"), b"alinmaz\n")
     _yaz(os.path.join(cwork, "prebuilt", "arm64-apple-ios", "libpng", "x"), b"x")
     _yaz(os.path.join(cwork, "prebuilt", "arm64-apple-ios", "expat", "x"), b"x")
+    _yaz(os.path.join(cwork, ".tmp", "gas-preprocessor.pl"), b"cok-gizli-betik")
+    _yaz(os.path.join(cwork, ".tmp", "source", "config", "alt-dizin-dosyasi"), b"x")
+    _yaz(os.path.join(cwork, ".tmp", "cmake", "build", "alt-dizin-dosyasi"), b"x")
+    _yaz(os.path.join(cwork, ".tmp", ".gizli"), b"x")
     if os.name == "posix":
         os.symlink(os.path.join(cwork, "build.log"), os.path.join(cwork, "src", "foo", "config.log"))
     cout = os.path.join(kok, "tani-out")
     s.tamam("tani_topla: çıkış kodu 0", tani_topla(cwork, cout) == 0)
     s.tamam("tani_topla: yalnız beklenen dosyalar",
-            sorted(os.listdir(cout)) == sorted(["build.log", "indeks.txt", "prebuilt-liste.txt", "src__expat__expat__config.log", "src__ffmpeg__build__meson-logs__meson-log.txt"]
+            sorted(os.listdir(cout)) == sorted(["build.log", "indeks.txt", "prebuilt-liste.txt", "tmp-liste.txt", "src__expat__expat__config.log", "src__ffmpeg__build__meson-logs__meson-log.txt"]
                                                + ["src__ffmpeg__" + g.replace("/", "__") for g in ffmpeg_adlari]))
     with open(os.path.join(cout, "src__ffmpeg__libavdevice__outdev_list.c"), "rb") as f:
         s.tamam("tani_topla: FFmpeg küme listesi içeriği aynen", f.read() == b"i\xc3\xa7erik libavdevice/outdev_list.c\n")
@@ -3349,6 +3571,11 @@ def _selftest_tani(s, kok):
     s.tamam("tani_topla: indeks bekleyen kütüphaneyi söyler", "bağımlılığı bekleyen kütüphaneler: freetype" in indeks)
     with open(os.path.join(cout, "prebuilt-liste.txt"), "rb") as f:
         s.tamam("tani_topla: prebuilt listesi", b"prebuilt/arm64-apple-ios/libpng" in f.read())
+    with open(os.path.join(cout, "tmp-liste.txt"), "rb") as f:
+        tmp_liste = f.read()
+    s.tamam("tani_topla: .tmp/ üst düzey listesi ad + lstat türü, sıralı; alt dizin ve içerik yok",
+            tmp_liste.decode("utf-8").splitlines() == ["dosya\t.gizli", "dizin\tcmake", "dosya\tgas-preprocessor.pl", "dizin\tsource"] and tmp_liste.endswith(b"\n")
+            and b"alt-dizin-dosyasi" not in tmp_liste and b"cok-gizli" not in tmp_liste)
     s.kirmizi_olmali("tani_topla: çıktı dizini varsa kırmızı", lambda: tani_topla(cwork, cout), "zaten var")
     _yaz(os.path.join(cwork, "src", "ffmpeg", "libavcodec", "codec_list.c"), b"x" * (TANI_DOSYA_SON + 5000) + b"SON\n")
     buyuk_out = os.path.join(kok, "tani-buyuk")
@@ -3358,6 +3585,13 @@ def _selftest_tani(s, kok):
     with open(os.path.join(buyuk_out, "src__ffmpeg__libavcodec__codec_list.c"), "rb") as f:
         s.tamam("tani_topla: büyük FFmpeg dosyasının başı korunur", f.read(10) == b"x" * 10)
     s.tamam("tani_topla: çalışma dizini yoksa 0 ve çıktı oluşmaz", tani_topla(os.path.join(kok, "yok-work"), os.path.join(kok, "yok-out")) == 0 and not os.path.exists(os.path.join(kok, "yok-out")))
+    for ad, kur_, beklenen_ in (("yok", lambda w: os.makedirs(w), ".tmp: yok\n"), ("dosya", lambda w: _yaz(os.path.join(w, ".tmp"), b"x"), ".tmp: dizin değil (dosya)\n")):
+        tw = os.path.join(kok, "tani-tmp-" + ad)
+        kur_(tw)
+        to = os.path.join(kok, "tani-tmp-out-" + ad)
+        tani_topla(tw, to)
+        with open(os.path.join(to, "tmp-liste.txt"), "rb") as f:
+            s.tamam("tani_topla: .tmp %s ise liste bunu yazar (hata vermez)" % ad, f.read().decode("utf-8") == beklenen_)
     if os.name == "posix":
         bag_work = os.path.join(kok, "tani-bag-work")
         _yaz(os.path.join(kok, "tani-bag-hedef"), b"gizli-icerik\n")

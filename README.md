@@ -80,8 +80,19 @@ build never downloads it:
   makes (`s+({` to `s+(\{` and `s*})` to `s*\})`, each exactly once; they stop an unescaped brace error of newer Perl), and
   their SHA-256 is a constant in `build.py` that is checked at placement time. Next then finds the file and skips its
   download branch (see patch 08 below).
-- `verify-lock` compares the placed file with that SHA-256 before and after the build, and before the build it also requires
-  the top level of `.tmp/` to be exactly `source` and `gas-preprocessor.pl`.
+- `verify-lock` compares the placed file with that SHA-256 before and after the build. It also requires the top level of
+  `.tmp/` to be exactly a fixed set, in both stages (an extra entry and a missing entry both fail; the table is closed, with
+  no prefix or wildcard match; names starting with a dot count; types are read with `lstat`, so a link never passes for a
+  directory; `.tmp` itself must be a real directory):
+  - before the build: exactly `source` and `gas-preprocessor.pl`;
+  - after the build: those two plus the three things FFmpegKitNext itself writes there during this build: `cmake` (the meson
+    setup of harfbuzz), `bundle-apple-universal-iphoneos-<min iOS>` and `bundle-apple-universal-iphonesimulator-<min iOS>`
+    (the `--xcframework` branch; `<min iOS>` is the value of `--target=` in `IOS_SECENEKLERI`, not a second constant).
+    `bundle-apple-universal-mac-catalyst-*` and `bundle-apple-universal-ios-*` are not written (only the two simulator and
+    device slices are built; the plain `ios` bundle is the non-`--xcframework` branch) and `ffkitprotocols` is not written
+    (`--no-ffmpeg-kit-protocols`), so they are failures if they appear.
+  The check does not go into `cmake/` or `bundle-*`: `download()` of Next writes only to the top level of `.tmp/`, the clone
+  targets are covered by the `src/` and `.tmp/source/` check, and the final frameworks are checked by `check` and attested.
 - The Perl that runs the script is the first `perl` on `PATH`; `toolchain.txt` records its path and version.
 
 No locked tree may contain a git submodule reference (gitlink) or a `.gitmodules` file, with two exceptions that are a
@@ -283,9 +294,11 @@ a path that already exists in the tree).
   credentials and token-shaped strings masked.
 - When the `build` job fails or is cancelled, `python3 build.py tani` collects the head and tail of `build.log` (sizes
   capped, the same masking applied), the `config.log`, `meson-log.txt` and CMake logs under `src/`, and a listing of
-  `prebuilt/`. The workflow uploads them as the artifact `tani-<run id>` with a 3-day retention; they are never part of
-  a release. The build runs in an allow-listed environment, so the logs are not expected to contain secrets; the masking
-  is a second line of defence, not a guarantee.
+  `prebuilt/`, and the top-level names of `.tmp/` with their `lstat` type (`tmp-liste.txt`; names only, no contents and no
+  sizes, collected whatever `verify-lock` said, so a wrong set shows in the artifact without rebuilding). The workflow
+  uploads them as the artifact `tani-<run id>` with a 3-day retention; they are never part of a release.
+  The build runs in an allow-listed environment, so the logs are not expected to contain secrets; the masking is a second
+  line of defence, not a guarantee.
 
 ## License
 

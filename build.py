@@ -844,6 +844,44 @@ def log_sonu(yol, bayt=LOG_SONU_BAYT):
 
 RE_BEKLEYEN = re.compile(r"INFO: Skipping ([A-Za-z0-9_.+-]+), dependencies built=0")
 
+# Next'in download() işlevi (scripts/function.sh) sonucunu build.log'a yalnız bu iki satırla bildirir. İndirme bu yapıda hiç beklenmez
+# (gas-preprocessor.pl yerleştirilir, geri kalanı kilitli kaynaktır); başarılı bir indirme de, başarısız olan da kırmızıdır.
+# clone_git_repository_with_* kendi satırlarını yazar, onların hedefleri verify-lock (b) kapsamındadır.
+INDIRME_IZLERI = (b"DEBUG: Downloaded ", b"ERROR: Failed to download")
+
+
+def indirme_izleri(yol, izler=INDIRME_IZLERI, blok=1 << 20):
+    """build.log'ta Next indirme satırlarının sayısı: {iz: (sayı, ilk bayt konumu)}. Dosya gigabayt olabilir: sabit boyutlu bloklarla,
+    blok sınırını aşan eşleşmeler için son len(iz)-1 baytı bir sonraki bloğa taşıyarak taranır; bütünü belleğe alınmaz."""
+    sonuc = {}
+    tasi = max(len(i) for i in izler) - 1
+    kuyruk = b""
+    taban = 0       # kuyruk[0]'ın dosyadaki konumu
+    with open(yol, "rb") as f:
+        while True:
+            parca = f.read(blok)
+            if not parca:
+                break
+            veri = kuyruk + parca
+            for iz in izler:
+                bas = 0
+                while True:
+                    i = veri.find(iz, bas)
+                    if i < 0:
+                        break
+                    bas = i + 1
+                    if i + len(iz) <= len(kuyruk):
+                        continue        # önceki blokta zaten sayıldı
+                    n, ilk = sonuc.get(iz, (0, taban + i))
+                    sonuc[iz] = (n + 1, ilk)
+            kuyruk = veri[-tasi:] if tasi else b""
+            taban += len(veri) - len(kuyruk)
+    return sonuc
+
+
+def indirme_mesaji(sonuc):
+    return "build.log'da Next indirme satırı var: " + ", ".join("'%s' ×%d (ilk bayt %d)" % (iz.decode("ascii").strip(), n, ilk) for iz, (n, ilk) in sorted(sonuc.items()))
+
 
 def bekleyen_kitapliklar(metin):
     """build.log sonunda 'bağımlılığı hazır değil' diye atlanan kütüphaneler (sıralı, yinelenmez)."""
@@ -858,18 +896,21 @@ def derle(work, env=None, komut=None, sessizlik_siniri=SESSIZLIK_SINIRI, calisti
     print("build: %s" % " ".join(komut))
     sys.stdout.flush()
     rc, asildi, son = calistir(komut, work, env, sessizlik_siniri)
+    log = os.path.join(work, "build.log")
+    indirme = indirme_izleri(log) if os.path.isfile(log) else {}
     if rc != 0 or asildi:
-        log = os.path.join(work, "build.log")
         bekleyen = []
         if os.path.isfile(log):
             sonu = log_sonu(log)
             bekleyen = bekleyen_kitapliklar(sonu)
             print("build.log: %d bayt; son 150 satır:" % os.path.getsize(log), file=sys.stderr)
             print(gizle("\n".join(sonu.splitlines()[-150:])), file=sys.stderr)
+        ek = "; " + indirme_mesaji(indirme) if indirme else ""
         if asildi:
-            raise Kirmizi("ios.sh %d sn hiç çıktı vermedi, süreç grubu öldürüldü; son çıktı: %r; build.log sonunda bağımlılığı bekleyen kütüphaneler: %s"
-                          % (sessizlik_siniri, gizle(son.decode("utf-8", "replace"))[-80:], ", ".join(bekleyen) or "yok"))
-        raise Kirmizi("ios.sh başarısız (kod %d)" % rc)
+            raise Kirmizi("ios.sh %d sn hiç çıktı vermedi, süreç grubu öldürüldü; son çıktı: %r; build.log sonunda bağımlılığı bekleyen kütüphaneler: %s%s"
+                          % (sessizlik_siniri, gizle(son.decode("utf-8", "replace"))[-80:], ", ".join(bekleyen) or "yok", ek))
+        raise Kirmizi("ios.sh başarısız (kod %d)%s" % (rc, ek))
+    kirmizi_if(indirme, indirme_mesaji(indirme))
     return cikti_dizini_bul(work)
 
 
@@ -2352,6 +2393,22 @@ def _selftest_icerik(s, kok):
             _sil(os.path.join(kok, "wg5"))
     fetch_cagrilari = cagri_sirasi("fetch")
     s.tamam("fetch: gas_yerlestir tüm kaynaklar çekildikten sonra, işlevin sonunda", fetch_cagrilari.index("gas_yerlestir") > fetch_cagrilari.index("kaynak_cek"))
+    # build.log indirme bekçisi (SK-947-6), saf işlev: blok sınırı, sayım, benzer ama farklı satırlar
+    ilog = os.path.join(kok, "indirme.log")
+    ok = True
+    for blok in (1, 3, 8, 64):
+        for iz in INDIRME_IZLERI:
+            for konum in range(0, 40):
+                _yaz(ilog, b"x" * konum + iz + b"rest\n" + b"y" * 10)
+                ok = ok and indirme_izleri(ilog, blok=blok) == {iz: (1, konum)}
+    s.tamam("indirme bekçisi: iki iz her konumda ve blok sınırını aşsa da tam bir kez, doğru konumda bulunur", ok)
+    _yaz(ilog, b"a\n" + INDIRME_IZLERI[0] + b"1\n" + INDIRME_IZLERI[0] + b"2\n" + INDIRME_IZLERI[1] + b"\n")
+    s.tamam("indirme bekçisi: tekrar eden izler sayılır, ilk konum korunur",
+            indirme_izleri(ilog, blok=5) == {INDIRME_IZLERI[0]: (2, 2), INDIRME_IZLERI[1]: (1, 2 + 2 * (len(INDIRME_IZLERI[0]) + 2))})
+    for benzer in (b"DEBUG: Downloading custom library x\n", b"INFO: gnu config already downloaded.\n", b"DEBUG: downloaded x\n", b"ERROR: Failed to clone x\n",
+                   b"error: failed to download x\n", b"DEBUG: Download skipped\n", b""):
+        _yaz(ilog, benzer)
+        s.tamam("indirme bekçisi: %r kırmızı vermez" % benzer[:30], indirme_izleri(ilog) == {})
     # alt modül (İ1/İ2) ve eşleşmeyen etiket
     # --- İ1/İ2 istisna tablosu (SK-936-1): altmodul_sorunlari, küçük sahte depolarla ---
     DLG = "395ccad2c1e0daae535c4d20bb0a3f2424648e17"
@@ -3459,6 +3516,21 @@ def _selftest_bekci(s, kok):
     s.tamam("derle: SIGTERM'e 0 ile çıkan takılı süreç de kırmızı sayılır", "hiç çıktı vermedi" in mesaj)
     mesaj, hata, sonuc = derle_sina('mkdir -p prebuilt/bundle-apple-xcframework-x\n')
     s.tamam("derle: başarılı ios.sh çıktı dizinini döndürür", mesaj == "" and sonuc is not None and sonuc.endswith("bundle-apple-xcframework-x"))
+    # SK-947-6: build.log'da Next'in iki indirme satırından biri varsa ios.sh başarılı olsa bile kırmızı
+    tamam_sh = "mkdir -p prebuilt/bundle-apple-xcframework-x\n"
+    for ad, satir in (("başarılı indirme", "DEBUG: Downloaded https://github.com/x/y to /w/.tmp/y"),
+                      ("başarısız indirme", "ERROR: Failed to download https://github.com/x/y to /w/.tmp/y, rc=22. ")):
+        mesaj, hata, sonuc = derle_sina('printf "\\n%s\\n" >> build.log\n' % satir + tamam_sh)
+        s.tamam("derle: build.log'da '%s' satırı varsa ios.sh başarılı olsa da kırmızı" % ad, "Next indirme satırı" in mesaj and satir[:18].strip() in mesaj and sonuc is None)
+    mesaj, hata, sonuc = derle_sina('printf "DEBUG: Downloaded a\\nERROR: Failed to download b\\n" >> build.log\n' + tamam_sh)
+    s.tamam("derle: iki indirme satırı birlikte de kırmızı ve ikisi de mesajda", "DEBUG: Downloaded" in mesaj and "ERROR: Failed to download" in mesaj)
+    mesaj, hata, sonuc = derle_sina('printf "DEBUG: Downloaded a\\n" >> build.log\nexit 1\n')
+    s.tamam("derle: başarısız ios.sh'ta indirme satırı mesaja eklenir", mesaj.startswith("ios.sh başarısız (kod 1); build.log'da Next indirme satırı"))
+    mesaj, hata, sonuc = derle_sina('printf "INFO: gnu config already downloaded. Source folder found at /w\\nDEBUG: Downloading custom library x\\n'
+                                    'DEBUG: Download skipped\\nERROR: Failed to clone y\\n" >> build.log\n' + tamam_sh)
+    s.tamam("derle: indirmeye benzeyen ama Next'in download() satırı olmayan log satırları kırmızı vermez", mesaj == "" and sonuc is not None)
+    mesaj, hata, sonuc = derle_sina(tamam_sh)
+    s.tamam("derle: build.log hiç yazılmadıysa da (indirme izi yok) yeşil", mesaj == "" and sonuc is not None)
 
 
 if __name__ == "__main__":
